@@ -211,8 +211,8 @@ void app_main(void)
 
     /* 启动 WiFi (硬编码 SSID 测试) */
     wifi_manager_config_t wifi_cfg = {
-        .sta_ssid = "YOUR_WIFI_SSID",       // TODO: 改为实际 SSID
-        .sta_password = "YOUR_WIFI_PASSWORD", // TODO: 改为实际密码
+        .sta_ssid = "ZTE-SONG-5G",                // 用户家 WiFi (5GHz Wi-Fi 6)
+        .sta_password = "51UPSONG99",          // 用户家 WiFi 密码
         .ap_ssid_prefix = "p4c5-agent",
         .ap_ssid = NULL,
         .ap_password = NULL,
@@ -270,8 +270,14 @@ void app_main(void)
         esp_task_wdt_reset();
         vTaskDelay(pdMS_TO_TICKS(10000));
 
-        ESP_LOGI(TAG, "💓 bat=%u%% dsh=%s wifi=connected",
+        /* W1 fix: 用 wifi_manager_get_status() 真实检测 WiFi 状态 */
+        wifi_manager_status_t wifi_st = {0};
+        wifi_manager_get_status(&wifi_st);
+        ESP_LOGI(TAG, "💓 bat=%u%% dsh=%s wifi=%s (IP=%s mode=%s)",
                  p4c5_pmic_get_battery_level(),
-                 dsh_client_is_connected() ? "✅" : "❌");
+                 dsh_client_is_connected() ? "✅" : "❌",
+                 wifi_st.sta_connected ? "connected" : "disconnected",
+                 wifi_st.sta_ip ? wifi_st.sta_ip : "0.0.0.0",
+                 wifi_st.mode ? wifi_st.mode : "off");
     }
 }
