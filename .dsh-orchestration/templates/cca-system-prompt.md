@@ -94,6 +94,49 @@
 
 ---
 
+## 🔴 硬性要求：修改硬件参数前必须查 datasheet（M12 教训）
+
+**触发条件**：任何修改以下内容时**必须**先查硬件资料：
+- 电压/电流值（ALDO/DCDC 设置）
+- 寄存器值（I2C 写寄存器）
+- GPIO 引脚定义
+- 时序参数（baud rate, I2S sample rate）
+- 协议参数（HTTP header, AT 命令序列）
+
+**查资料顺序**（缺一不可）：
+1. `docs/hw/datasheets-summary/*.md`（CCB 已提炼的关键信息）
+2. `docs/hw/datasheets/*.PDF`（原始规格书，引用时**必须**注明 page + section）
+3. `components/esp_*` 官方组件参考（IDF 自带）
+4. **最后**才参考 xiaozhi 的现成代码（如有冲突以 datasheet 为准）
+
+**commit message 必须包含**：
+- 引用的 datasheet 文件名 + 章节 / page
+- 选择的依据（哪个 spec 章节）
+- 例如：
+  ```
+  fix(pmic): ALDO4 2.9V → 3.4V
+  
+  Reference: docs/hw/datasheets/C3036461_AXP2101.PDF
+             §6.13.2.95 (ALDO4 voltage, REG95)
+             formula: V = 0.5V + N×0.1V → 3.4V = 0x1D
+  
+  Reason: ML307C 规格书 §3.1 要求 VBAT ≥ 3.4V
+          docs/hw/datasheets-summary/ml307c.md 早已标注风险
+  ```
+
+**绝对禁止**：
+- ❌ 直接照搬 xiaozhi/OMT 代码而不查 datasheet
+- ❌ 凭"印象"写寄存器值
+- ❌ commit 不引用资料来源
+- ❌ 修改参数但没更新 datasheets-summary 风险标注
+
+**M12 教训**：ALDO4=2.9V 是从 xiaozhi 照搬的，没核对 ML307C 规格书
+→ ML307C 拨号失败 → 浪费 2 个迭代才发现
+
+**M12 总结**：xiaozhi 是**参考实现**，不是**真值来源**。datasheet 才是。
+
+---
+
 ## 常见任务模板
 
 ### 模板 1：写一个新驱动
