@@ -1,0 +1,40 @@
+## p4c5-agent-terminal IDF Component Manager Manifest
+## 依赖清单 — 基于 xiaozhi 参考工程，按本项目需求裁剪
+dependencies:
+  ## ── 第三方库 ──
+  espressif/esp_audio_codec: "~2.4.1"       # ES8311 + ES7210 codec 驱动
+  78/esp-ml307: "~3.6.4"                    # ML307C 4G 模组协议栈
+  78/esp-wifi-connect: "~3.1.1"             # WiFi 连接管理
+  lvgl/lvgl: "~9.4.0"                       # LVGL 图形库
+  esp_lvgl_port: "~2.7.0"                   # LVGL ESP-IDF 适配层
+  espressif/esp_lcd_touch_st7123: "^1.0.0"  # ST7123 触摸驱动
+  espressif/esp_hosted:
+    version: "2.12.3"                       # P4↔C5 WiFi 协处理
+    rules:
+      - if: target in [esp32p4]
+  espressif/esp_wifi_remote:
+    version: "1.4.0"
+    rules:
+      - if: target in [esp32p4]
+
+  ## ── 本项目自定义组件（路径引用） ──
+  p4c5_board:
+    path: ../components/p4c5_board
+  p4c5_audio:
+    path: ../components/p4c5_audio
+  p4c5_display:
+    path: ../components/p4c5_display
+  p4c5_pmic:
+    path: ../components/p4c5_pmic
+  p4c5_4g:
+    path: ../components/p4c5_4g
+
+  ## ── xiaozhi 参考组件（路径引用，需从 xiaozhi 复制） ──
+  esp_lcd_st7102:
+    path: ../components/esp_lcd_st7102      # ST7102 LCD 驱动（从 xiaozhi 复制）
+  pmic_axp2101:
+    path: ../components/pmic_axp2101        # AXP2101 PMIC 驱动（从 xiaozhi 复制）
+
+  ## ── IDF 版本 ──
+  idf:
+    version: ">=5.5.2"

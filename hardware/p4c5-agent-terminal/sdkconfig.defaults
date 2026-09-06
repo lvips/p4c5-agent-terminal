@@ -1,0 +1,40 @@
+# p4c5-agent-terminal sdkconfig defaults
+# 生成于 M4 阶段 — 最小可编译骨架
+
+# ── 目标芯片 ──
+CONFIG_IDF_TARGET="esp32p4"
+
+# ── 分区表 ──
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+CONFIG_PARTITION_TABLE_FILENAME="partitions.csv"
+
+# ── Flash (16MB) ──
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
+
+# ── PSRAM (Octal, 默认 P4 配置) ──
+CONFIG_ESP_PSRAM=y
+CONFIG_SPIRAM=y
+
+# ── WiFi (通过 ESP-Hosted C5 协处理器) ──
+CONFIG_ESP_HOSTED_ENABLED=y
+CONFIG_ESP_HOSTED_CP_TARGET_ESP32C5=y
+CONFIG_SLAVE_IDF_TARGET_ESP32C5=y
+
+# ── 音频 ──
+# 采样率 24kHz（ES8311 + ES7210 推荐）
+# 具体采样率由组件代码设定，此处仅做占位
+
+# ── FreeRTOS ──
+CONFIG_FREERTOS_HZ=1000
+
+# ── 日志级别 ──
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+CONFIG_LOG_DEFAULT_LEVEL=3
+
+# ── 4G 模组 ──
+# CONFIG_P4C5_4G_ENABLED 由 Kconfig.projbuild 定义
+
+# ── LWIP ──
+CONFIG_LWIP_MAX_SOCKETS=16

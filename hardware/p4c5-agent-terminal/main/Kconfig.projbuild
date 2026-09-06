@@ -1,0 +1,35 @@
+menu "P4C5 Agent Terminal"
+
+    config P4C5_BOARD_VERSION
+        string "Board version string"
+        default "v0.1.0"
+        help
+            Board version displayed at boot and reported via WebSocket.
+
+    config P4C5_4G_ENABLED
+        bool "Enable 4G modem (ML307C)"
+        default y
+        help
+            Initialize ML307C Cat.1 modem on boot.
+            If disabled, only WiFi (via ESP-Hosted C5) is available.
+
+    config P4C5_LVGL_ENABLED
+        bool "Enable LVGL UI"
+        default y
+        help
+            Start LVGL display task with ST7102 LCD + ST7123 touch.
+
+    config P4C5_AUDIO_DUMP_ENABLED
+        bool "Enable audio dump to SD card"
+        default n
+        help
+            Record raw PCM to SD card for debugging.
+            Requires SD card mounted.
+
+    config P4C5_AEC_ENABLED
+        bool "Enable AEC (Acoustic Echo Cancellation)"
+        default y
+        help
+            Feed I2S DAC output as AEC reference channel to ES7210.
+
+endmenu
