@@ -9,7 +9,7 @@
  *   1. PMIC (先供电)
  *   2. Display (屏幕需要 AXP2101 的 LDO 输出)
  *   3. Audio (codec 需要 ALDO3=3.3V)
- *   4. 4G (ML307C 需要 ALDO4=2.9V)
+ *   4. 4G (ML307C 需要 ALDO4=3.4V)
  */
 
 #pragma once

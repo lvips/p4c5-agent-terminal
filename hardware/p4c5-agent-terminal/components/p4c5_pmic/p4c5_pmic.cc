@@ -11,7 +11,7 @@
  *   1. axp2101_init(i2c_bus) — 创建 I2C device
  *   2. axp2101_check_chip_id() — 验证 0x03 = 0x4A
  *   3. axp2101_set_dcdc_voltage/enabled — DCDC1 = 3.3V
- *   4. axp2101_set_ldo_voltage/enabled — ALDO1=1.8V, ALDO3=3.3V, ALDO4=2.9V
+ *   4. axp2101_set_ldo_voltage/enabled — ALDO1=1.8V, ALDO3=3.3V, ALDO4=3.4V
  *   5. 写 13 个特殊寄存器（0x64 用 RMW 模式验证，bits[2:0]=011=4.2V）
  *   6. axp2101_enable_pmu_adc_channels — 使能电池/系统电压 ADC
  *
@@ -23,8 +23,8 @@
  *   读回 0x03 是正确值，不是 bug！改为 RMW 模式让验证通过。
  *
  * 风险标注（代码中均用 ⚠️ 标记）：
- *   R2.1: ALDO4 = 2.9V 可能不够 ML307C（标称 3.4-4.2V），M1 实测
- *   R2.2: 0x64 充电电压修正（本文件核心修改）
+ *   R4: ALDO4 = 3.4V (T12 修复: 从 2.9V 提升到 3.4V, 满足 ML307C 最低要求)
+ *   R2.2: 0x64 充电电压修正（T11 已修复）
  *   R2.3: 0x16 输入限流解码版本差异（不同芯片批次可能不同）
  *   R2.4: 0x90 ALDO2 使能（xiaozhi 使能，本项目保持兼容，~1mA 额外功耗）
  */
@@ -299,16 +299,17 @@ esp_err_t p4c5_pmic_init(void* i2c_bus)
                         TAG, "ALDO3 enable failed");
     ESP_LOGI(TAG, "  ALDO3 = 3.3V ✅");
 
-    /* ALDO4 = 2.9V (4G 模组 VBAT)
-     * ⚠️ R2.1: 2.9V 可能不够 ML307C 标称 3.4-4.2V
+    /* ALDO4 = 3.4V (4G 模组 VBAT)
+     * ⚠️ R4 修复: 从 2.9V 提升到 3.4V
      *    ML307C-DC-CN 工作电压范围 VBAT: 3.4V ~ 4.4V (typ)
-     *    但酷世原理图确认 ALDO4 输出 2.9V
-     *    → M1 必须实测 ML307C 在 2.9V 下能否正常拨号 */
-    ESP_RETURN_ON_ERROR(axp2101_set_ldo_voltage(AXP2101_LDO_ALDO4, 2.9f),
+     *    2.9V 低于最低要求，导致波特率检测失败
+     *    AXP2101 REG95: V = 0.5 + N×0.1V, 3.4V → N=29 → reg=0x1D
+     *    选择 3.4V 而非 3.5V，留 100mV 余量避免接近 max */
+    ESP_RETURN_ON_ERROR(axp2101_set_ldo_voltage(AXP2101_LDO_ALDO4, 3.4f),
                         TAG, "ALDO4 voltage failed");
     ESP_RETURN_ON_ERROR(axp2101_set_ldo_enabled(AXP2101_LDO_ALDO4, true),
                         TAG, "ALDO4 enable failed");
-    ESP_LOGW(TAG, "  ALDO4 = 2.9V ✅ (⚠️ R2.1: 可能不够 ML307C 3.4V min)");
+    ESP_LOGI(TAG, "  ALDO4 = 3.4V ✅ (R4 fixed: was 2.9V, ML307C needs ≥3.4V)");
 
     /* 等待电源稳定 */
     vTaskDelay(pdMS_TO_TICKS(50));
@@ -484,13 +485,13 @@ esp_err_t p4c5_pmic_set_4g_power(bool on)
 
     esp_err_t err;
     if (on) {
-        /* 确保 ALDO4 = 2.9V 且使能 */
-        err = axp2101_set_ldo_voltage(AXP2101_LDO_ALDO4, 2.9f);
+        /* 确保 ALDO4 = 3.4V 且使能 */
+        err = axp2101_set_ldo_voltage(AXP2101_LDO_ALDO4, 3.4f);
         if (err != ESP_OK) return err;
         err = axp2101_set_ldo_enabled(AXP2101_LDO_ALDO4, true);
         if (err != ESP_OK) return err;
         s_4g_power_on = true;
-        ESP_LOGI(TAG, "4G power ON (ALDO4=2.9V)");
+        ESP_LOGI(TAG, "4G power ON (ALDO4=3.4V)");
     } else {
         err = axp2101_set_ldo_enabled(AXP2101_LDO_ALDO4, false);
         if (err != ESP_OK) return err;
