@@ -108,6 +108,7 @@ class MockDshServer:
         self.simulate_large_frame = False  # 是否发送大帧（测试多包拼接）
         self.disconnect_after_n_heartbeats = 0  # N 次心跳后断开（0=不断）
         self.heartbeat_count = {}  # ws → count
+        self.broadcast_text = False  # W3: 是否把 assistant_text 广播给所有客户端 (供 TTS Adapter 订阅)
 
     async def handle_client(self, ws):
         """处理单个客户端连接"""
@@ -247,9 +248,13 @@ class MockDshServer:
                   reply[len(reply)//3:2*len(reply)//3],
                   reply[2*len(reply)//3:]]
         for chunk in chunks:
-            await self._send(ws, make_frame("assistant_text",
+            text_frame = make_frame("assistant_text",
                 content=chunk,
-                message_id=msg_id))
+                message_id=msg_id)
+            await self._send(ws, text_frame)
+            # ★ W3: 广播模式 - 同步发给所有客户端 (TTS Adapter 可订阅)
+            if self.broadcast_text:
+                await self._broadcast_frame(text_frame, exclude=ws)
             await asyncio.sleep(0.2)
 
         # 3. assistant_done
@@ -373,6 +378,32 @@ class MockDshServer:
         stats['bytes_tx'] += len(data)
         await ws.send(data)
         logger.info(f"📤 发送: {frame.get('type', '?')} ({len(data)} bytes)")
+
+    async def _broadcast_frame(self, frame, exclude=None):
+        """W3: 广播 JSON 帧给所有客户端 (TTS Adapter 订阅模式)
+
+        用于在 broadcast_text=True 时, 把 assistant_text 也发给其他客户端
+        (不只是触发 user_input 的那个)
+        """
+        data = json.dumps(frame, ensure_ascii=False)
+        broadcast_count = 0
+        for other_ws in list(self.sessions.keys()):
+            if other_ws is exclude:
+                continue
+            # 检查连接状态 (websockets 库: state 属性)
+            try:
+                if other_ws.state.name in ("CLOSED", "CLOSING"):
+                    continue
+            except AttributeError:
+                # 旧版 websockets 没有 state.name
+                pass
+            try:
+                await other_ws.send(data)
+                broadcast_count += 1
+            except Exception as e:
+                logger.warning(f"广播失败: {e}")
+        if broadcast_count > 0:
+            logger.info(f"📡 广播 {frame.get('type', '?')} 到 {broadcast_count} 个客户端")
 
     async def _send_binary(self, ws, data: bytes):
         """发送 WS Binary 帧 (W3: ASR 结果回放/下行 TTS 占位)"""
@@ -557,6 +588,8 @@ def main():
                         help='N 次心跳后主动断开（测试重连）')
     parser.add_argument('--verbose', '-v', action='store_true',
                         help='详细日志')
+    parser.add_argument('--broadcast-text', action='store_true',
+                        help='广播 assistant_text 给所有客户端 (TTS Adapter 订阅模式)')
 
     args = parser.parse_args()
 
@@ -567,6 +600,7 @@ def main():
     server.auto_reply = not args.no_auto_reply
     server.simulate_large_frame = args.large_frame
     server.disconnect_after_n_heartbeats = args.disconnect_after
+    server.broadcast_text = args.broadcast_text
 
     try:
         asyncio.run(server.run())
