@@ -11,6 +11,7 @@ idf_component_register(SRCS ${SOURCES}
         p4c5_display
         p4c5_audio
         p4c5_4g
+        p4c5_ui
         dsh_client
         esp_driver_gpio
         esp_driver_i2c

@@ -18,9 +18,9 @@
 #include "p4c5_display.h"
 #include "p4c5_audio.h"
 #include "p4c5_4g.h"
+#include "p4c5_ui.h"
 #include "dsh_client.h"
 #include "config.h"
-#include <esp_lcd_panel_ops.h>
 #include <string.h>
 
 static const char *TAG = "app_main";
@@ -124,41 +124,6 @@ static void on_4g_event(p4c5_4g_event_t event, const char *data, void *user_data
             ESP_LOGW(TAG, "📱 Network timeout");
             break;
     }
-}
-
-/* ── Display 测试：画 RGB 渐变 ── */
-static void draw_test_pattern(void)
-{
-    esp_lcd_panel_handle_t panel = (esp_lcd_panel_handle_t)p4c5_display_get_panel();
-    if (!panel) {
-        ESP_LOGW(TAG, "Display panel not available, skip test pattern");
-        return;
-    }
-
-    const int w = P4C5_LCD_WIDTH;
-    const int h = P4C5_LCD_HEIGHT;
-    const int line_size = w * 2;
-
-    uint16_t *line_buf = (uint16_t *)heap_caps_malloc(line_size, MALLOC_CAP_SPIRAM);
-    if (!line_buf) return;
-
-    for (int y = 0; y < h; y++) {
-        int band = (y * 5) / h;
-        for (int x = 0; x < w; x++) {
-            uint8_t r, g, b;
-            uint8_t intensity = (x * 255) / w;
-            switch (band) {
-                case 0: r = intensity; g = 0;         b = 0;         break;
-                case 1: r = 0;         g = intensity; b = 0;         break;
-                case 2: r = 0;         g = 0;         b = intensity; break;
-                case 3: r = intensity; g = intensity; b = intensity; break;
-                default: r = 0;        g = 0;         b = 0;         break;
-            }
-            line_buf[x] = ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3);
-        }
-        esp_lcd_panel_draw_bitmap(panel, 0, y, w, y + 1, line_buf);
-    }
-    free(line_buf);
 }
 
 /* ══════════════════════════════════════════════════════════ */
@@ -299,8 +264,11 @@ void app_main(void)
     ESP_LOGI(TAG, "  v%s ready", P4C5_BOARD_VERSION);
     ESP_LOGI(TAG, "=========================================");
 
-    /* M7 实测（可选） */
-    draw_test_pattern();
+    /* M7 → T14: 测试图 → LVGL 真 UI */
+    err = p4c5_ui_init();
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "LVGL UI init failed (non-fatal): %s", esp_err_to_name(err));
+    }
 
     /* 主循环 */
     while (1) {

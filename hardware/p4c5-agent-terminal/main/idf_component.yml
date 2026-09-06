@@ -4,10 +4,10 @@ dependencies:
   ## ── 第三方库 ──
   espressif/esp_audio_codec: "~2.4.1"       # ES8311 + ES7210 codec 驱动
   espressif/esp_codec_dev: "~1.5.9"          # codec_dev 设备抽象层 (esp_audio_codec 依赖)
-  78/esp-ml307: "~3.6.4"                    # ML307C 4G 模组协议栈
+  78/esp-ml307: "*"                          # ML307C 4G 模组协议栈（任意版本，以兼容 IDF 5.4）
+  # 78/uart-uhci 由 esp-ml307 v3.5.3 内部提供，无需显式声明
   # 78/esp-wifi-connect: "~3.1.1"             # WiFi 连接管理（M5 暂时禁用）
   lvgl/lvgl: "~9.4.0"                       # LVGL 图形库
-  esp_lvgl_port: "~2.7.0"                   # LVGL ESP-IDF 适配层
   espressif/esp_lcd_touch_st7123: "^1.0.0"  # ST7123 触摸驱动
   # espressif/esp_hosted:                       # P4↔C5 WiFi 协处理（M5 暂时禁用）
   #   version: "2.12.3"
@@ -29,6 +29,8 @@ dependencies:
     path: ../components/p4c5_pmic
   p4c5_4g:
     path: ../components/p4c5_4g
+  p4c5_ui:
+    path: ../components/p4c5_ui
   dsh_client:
     path: ../components/dsh_client
 
