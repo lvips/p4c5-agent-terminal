@@ -345,6 +345,16 @@ esp_err_t dsh_client_send(const char *frame_type, cJSON *payload)
     return err;
 }
 
+esp_err_t dsh_client_send_audio(const uint8_t *data, size_t len)
+{
+    /* W3: 走 transport->send_binary (WS Binary 帧) */
+    if (!data || len == 0) return ESP_ERR_INVALID_ARG;
+    if (!s_transport || !s_transport->send_binary) {
+        return ESP_ERR_NOT_SUPPORTED;
+    }
+    return s_transport->send_binary(data, len);
+}
+
 /* ══════════════════════════════════════════════════════════
  * 心跳控制
  * ══════════════════════════════════════════════════════════ */

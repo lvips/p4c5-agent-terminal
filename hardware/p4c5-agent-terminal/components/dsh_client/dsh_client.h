@@ -182,6 +182,18 @@ esp_err_t dsh_client_send_tool_result(const char *tool_id, cJSON *result);
  */
 esp_err_t dsh_client_send_user_input(const char *text);
 
+/**
+ * W3: 发送音频二进制帧 (Opus 编码后的 PCM, 用于语音上行)
+ *
+ * 调用方负责编码为 Opus (16kbps, 16kHz mono, 20ms/帧)。
+ * 实际通过 WebSocket Binary 帧上行, Mac Adapter 端解码后做 ASR。
+ *
+ * @param data Opus 数据
+ * @param len  长度 (通常 30-80 字节/帧)
+ * @return ESP_OK 成功, ESP_ERR_INVALID_STATE 未连接
+ */
+esp_err_t dsh_client_send_audio(const uint8_t *data, size_t len);
+
 /* ══════════════════════════════════════════════════════════
  * 通用发送（1 个）
  * ══════════════════════════════════════════════════════════ */

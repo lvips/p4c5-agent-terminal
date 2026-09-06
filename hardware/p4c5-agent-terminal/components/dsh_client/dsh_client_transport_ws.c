@@ -32,7 +32,13 @@ static esp_err_t ws_stop(void)
 
 static esp_err_t ws_send_text(const char *text, size_t len)
 {
+    (void)len;
     return dsh_ws_send_text(text);
+}
+
+static esp_err_t ws_send_binary(const uint8_t *data, size_t len)
+{
+    return dsh_ws_send_binary(data, len);
 }
 
 static bool ws_is_connected(void)
@@ -59,6 +65,7 @@ const dsh_transport_t dsh_transport_ws = {
     .start        = ws_start,
     .stop         = ws_stop,
     .send_text    = ws_send_text,
+    .send_binary  = ws_send_binary,
     .is_connected = ws_is_connected,
     .set_state_cb = ws_set_state_cb,
     .set_json_cb  = ws_set_json_cb,

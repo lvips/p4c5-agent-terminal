@@ -83,6 +83,18 @@ esp_err_t dsh_ws_send_json(cJSON *json);
 esp_err_t dsh_ws_send_text(const char *text);
 
 /**
+ * 发送二进制帧 (W3: 音频上行 Opus 帧)
+ *
+ * 用于实时音频流上传 (Opus 编码后的 PCM 帧, 16kbps, 20ms 帧)。
+ * 实际是 WS Binary 帧 (per RFC 6455)。
+ *
+ * @param data 二进制数据
+ * @param len  数据长度 (字节)
+ * @return ESP_OK 成功, ESP_ERR_INVALID_STATE 未连接
+ */
+esp_err_t dsh_ws_send_binary(const uint8_t *data, size_t len);
+
+/**
  * 是否已连接
  */
 bool dsh_ws_is_connected(void);

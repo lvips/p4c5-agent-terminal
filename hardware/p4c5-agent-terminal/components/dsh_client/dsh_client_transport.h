@@ -47,6 +47,7 @@ typedef struct {
     esp_err_t (*start)(void);
     esp_err_t (*stop)(void);
     esp_err_t (*send_text)(const char *text, size_t len);
+    esp_err_t (*send_binary)(const uint8_t *data, size_t len);  /* W3: 音频上行 */
     bool      (*is_connected)(void);
 
     void (*set_state_cb)(dsh_transport_state_cb_t cb, void *user_data);

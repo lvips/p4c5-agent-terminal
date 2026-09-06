@@ -254,6 +254,20 @@ esp_err_t dsh_ws_send_text(const char *text)
     return (ret >= 0) ? ESP_OK : ESP_FAIL;
 }
 
+esp_err_t dsh_ws_send_binary(const uint8_t *data, size_t len)
+{
+    if (!s_ws || !s_connected) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (!data || len == 0) return ESP_ERR_INVALID_ARG;
+
+    /* WS Binary 帧上行 (W3: Opus 音频帧) */
+    int ret = esp_websocket_client_send_bin(
+        s_ws, (const char *)data, (int)len, pdMS_TO_TICKS(5000));
+
+    return (ret >= 0) ? ESP_OK : ESP_FAIL;
+}
+
 bool dsh_ws_is_connected(void)
 {
     return s_connected;
