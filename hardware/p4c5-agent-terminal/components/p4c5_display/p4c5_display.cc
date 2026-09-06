@@ -18,6 +18,7 @@
 #include <esp_log.h>
 #include <driver/gpio.h>
 #include <driver/ledc.h>
+#include <esp_check.h>
 #include <esp_lcd_panel_ops.h>
 #include <esp_lcd_mipi_dsi.h>
 #include <esp_lcd_st7102.h>
@@ -67,13 +68,13 @@ static esp_err_t init_backlight(void)
     ESP_RETURN_ON_ERROR(ledc_timer_config(&timer_cfg), TAG, "LEDC timer failed");
 
     ledc_channel_config_t ch_cfg = {
+        .gpio_num   = P4C5_LCD_BL_GPIO,
         .speed_mode = LEDC_LOW_SPEED_MODE,
-        .channel = LEDC_CHANNEL_0,
-        .timer_sel = LEDC_TIMER_0,
-        .intr_type = LEDC_INTR_DISABLE,
-        .gpio_num = P4C5_LCD_BL_GPIO,
-        .duty = 255,  /* 默认最亮 */
-        .hpoint = 0,
+        .channel    = LEDC_CHANNEL_0,
+        .intr_type  = LEDC_INTR_DISABLE,
+        .timer_sel  = LEDC_TIMER_0,
+        .duty       = 255,  /* 默认最亮 */
+        .hpoint     = 0,
     };
     ESP_RETURN_ON_ERROR(ledc_channel_config(&ch_cfg), TAG, "LEDC channel failed");
     ESP_LOGI(TAG, "Backlight PWM initialized (GPIO %d)", P4C5_LCD_BL_GPIO);

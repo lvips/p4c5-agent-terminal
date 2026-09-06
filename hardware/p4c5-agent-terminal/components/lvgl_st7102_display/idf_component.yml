@@ -1,0 +1,17 @@
+version: "1.0.0"
+description: "KSDIY · LVGL9 + ST7102 MIPI DSI port — Kevincoooool"
+license: "Apache-2.0"
+url: "https://github.com/kevincoooool/ESP32P4_KSDIY"
+repository: "https://github.com/kevincoooool/ESP32P4_KSDIY.git"
+repository_info:
+  path: "P4_C5_4.3_Firmware/components/lvgl_st7102_display"
+files:
+  exclude:
+    - "ESP-IDF/**"
+dependencies:
+  idf: ">=5.0"
+  lvgl/lvgl: ">=8,<10"
+  espressif/esp_lvgl_adapter: "^0.2.0"
+  espressif/esp_lcd_touch_st7123: "^1.0"
+  kevincoooool/esp_lcd_st7102: "^1.0.0"
+  kevincoooool/pmic_axp2101: "^1.0.0"

@@ -13,13 +13,10 @@
  */
 
 #include "p4c5_board.h"
-#include "p4c5_pmic.h"
-#include "p4c5_display.h"
-#include "p4c5_audio.h"
-#include "p4c5_4g.h"
 #include "config.h"
 
 #include <esp_log.h>
+#include <esp_check.h>
 #include <driver/i2c_master.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -52,6 +49,9 @@ static esp_err_t init_i2c(void)
 }
 
 /* ── 公开 API ── */
+/* 板级只负责 I2C bus 初始化。子系统 init (pmic/display/audio/4g)
+   由 main.c 直接按序调用，参考 xiaozhi 启动模式。
+   这样设计避免 p4c5_* 静态库链接器丢符号问题。 */
 
 esp_err_t p4c5_board_init(void)
 {
@@ -65,33 +65,12 @@ esp_err_t p4c5_board_init(void)
     ESP_LOGI(TAG, "========================================");
 
     /* Step 1: I2C bus (所有 I2C 设备共享) */
-    ESP_LOGI(TAG, "[1/5] Initializing I2C bus...");
+    ESP_LOGI(TAG, "[1/1] Initializing shared I2C bus...");
     ESP_RETURN_ON_ERROR(init_i2c(), TAG, "I2C init failed");
-
-    /* Step 2: PMIC (先供电，其他设备才能工作) */
-    ESP_LOGI(TAG, "[2/5] Initializing PMIC (AXP2101)...");
-    ESP_RETURN_ON_ERROR(p4c5_pmic_init(s_i2c_bus), TAG, "PMIC init failed");
-
-    /* Step 3: Display (ST7102 + ST7123) */
-    ESP_LOGI(TAG, "[3/5] Initializing display (ST7102 + ST7123)...");
-    ESP_RETURN_ON_ERROR(p4c5_display_init(), TAG, "Display init failed");
-
-    /* Step 4: Audio (ES8311 + ES7210) */
-    ESP_LOGI(TAG, "[4/5] Initializing audio (ES8311 + ES7210)...");
-    p4c5_audio_set_i2c_bus(s_i2c_bus);  /* 注入共享 I2C bus */
-    ESP_RETURN_ON_ERROR(p4c5_audio_init(), TAG, "Audio init failed");
-
-    /* Step 5: 4G modem (ML307C) */
-    ESP_LOGI(TAG, "[5/5] Initializing 4G modem (ML307C)...");
-    esp_err_t err_4g = p4c5_4g_init();
-    if (err_4g != ESP_OK) {
-        /* 4G 初始化失败不阻塞 — WiFi 仍可用 */
-        ESP_LOGW(TAG, "4G init failed (non-fatal): %s", esp_err_to_name(err_4g));
-    }
 
     s_initialized = true;
     ESP_LOGI(TAG, "========================================");
-    ESP_LOGI(TAG, " Board init complete");
+    ESP_LOGI(TAG, " Board init complete (I2C ready, subsystems from main.c)");
     ESP_LOGI(TAG, "========================================");
     return ESP_OK;
 }
@@ -105,11 +84,7 @@ void p4c5_board_deinit(void)
 {
     if (!s_initialized) return;
 
-    ESP_LOGI(TAG, "Deinitializing board...");
-    p4c5_4g_deinit();
-    p4c5_audio_deinit();
-    p4c5_display_deinit();
-    p4c5_pmic_deinit();
+    ESP_LOGI(TAG, "Deinitializing board (I2C bus only)...");
 
     if (s_i2c_bus) {
         i2c_del_master_bus(s_i2c_bus);

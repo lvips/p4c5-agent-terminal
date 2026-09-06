@@ -30,7 +30,7 @@
 #include <esp_codec_dev.h>
 #include <esp_codec_dev_defaults.h>
 #include <es8311_codec.h>
-#include <es7210_codec.h>
+#include <es7210_adc.h>
 #include <math.h>
 #include <mutex>
 #include <cstring>

@@ -1,0 +1,18 @@
+idf_component_register(
+    SRCS
+        "ksdiy_example_display.c"
+        "ksdiy_lvgl_port.c"
+        "myFont.c"
+    INCLUDE_DIRS
+        "."
+    REQUIRES
+        lvgl
+        esp_lcd
+        esp_lcd_st7102
+        esp_lcd_touch_st7123
+        esp_lvgl_adapter
+    PRIV_REQUIRES
+        pmic_axp2101
+        esp_driver_ledc
+        freertos
+)

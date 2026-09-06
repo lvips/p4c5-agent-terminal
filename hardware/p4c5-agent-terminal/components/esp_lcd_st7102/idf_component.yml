@@ -1,0 +1,9 @@
+version: "1.0.0"
+description: "KSDIY · ESP LCD ST7102 (RGB/MIPI DSI) — Kevincoooool"
+license: "Apache-2.0"
+url: "https://github.com/kevincoooool/ESP32P4_KSDIY"
+repository: "https://github.com/kevincoooool/ESP32P4_KSDIY.git"
+repository_info:
+  path: "P4_C5_4.3_Firmware/components/esp_lcd_st7102"
+dependencies:
+  idf: ">=5.0"
