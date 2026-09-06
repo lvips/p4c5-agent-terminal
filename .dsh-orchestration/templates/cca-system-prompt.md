@@ -137,6 +137,45 @@
 
 ---
 
+## 🔴 硬性要求：整合官方开源参考实现（M16 教训）
+
+**触发条件**：任何涉及以下组件/算法时**必须**先调研官方开源参考：
+- 图形栈（LVGL / esp_lvgl_adapter / p4c5_ui）
+- 屏幕驱动（MIPI DSI / ST7102 / DPI 时序）
+- 触摸集成（esp_lcd_touch_*）
+- 协议栈（WebSocket / dsh_client transport）
+- 任何性能敏感路径（带宽、实时性）
+
+**官方参考来源**（按优先级）：
+1. **ESP-IDF examples/** — `/Volumes/ZT-1T/项目开发/TLA/01-esp-idf-setup/esp-idf-v5.5.5/examples/peripherals/{lcd,mipi_dsi,lvgl}/`
+2. **esp_* 官方组件** — `managed_components/espressif__*/`
+3. **xiaozhi 复用** — `/tmp/p4c5_xiaozhi/`（仅当 1+2 都没现成方案时）
+4. **OMT 复用** — `/Volumes/ZT-1T/项目开发/OMT/`
+
+**任务步骤**（开始任何 T 任务前）：
+1. DSH 写派发 prompt 前，**先 grep 官方 examples 目录**
+2. 找到参考实现后，**提取关键 API + 配置 + 参数**写进 prompt
+3. CCA/CCB 在 prompt 里看到完整参考，**不需要自己再调研**
+
+**绝对禁止**：
+- ❌ 不查资料就派活，让CC 直接"自己想办法"
+- ❌ 让CC 走自己摸索路线，结果一周才发现官方一行调用解决
+- ❌ 忽视"已有 IDF 官方组件"——总以为要自己写
+
+**M16 教训**：
+- 我让 CCA T16 走"降刷新率"路线，结果才用2 分钟就走偏
+- DSH 调研 `xiaozhi/ksdiy_lvgl_port.c` 发现用 **`esp_lv_adapter`**，5 分钟搞定
+- 如果让 CC 自己查，至少浪费 30 分钟
+- **DSH 责任：派活前必须查官方资料**
+
+**M16 总结**：DSH 是**指挥官**，不是**甩手掌柜**。每个 T 任务前必须：
+1. 至少花 5-10 分钟调研官方资料
+2. 找到最简方案
+3. 写完整参考进 prompt
+4. CC 拿到即可动手，避免走弯路
+
+---
+
 ## 常见任务模板
 
 ### 模板 1：写一个新驱动
