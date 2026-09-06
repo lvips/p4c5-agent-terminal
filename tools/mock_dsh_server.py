@@ -124,6 +124,12 @@ class MockDshServer:
                 stats['frames_rx'] += 1
                 stats['bytes_rx'] += len(message)
 
+                # ★ W3: 区分文本帧 (JSON 控制) 和二进制帧 (OPUS 音频)
+                # websockets 库: type==BINARY 是 OPUS 数据, type==TEXT 是 JSON
+                if isinstance(message, bytes):
+                    await self._handle_audio_binary(ws, session, message)
+                    continue
+
                 try:
                     data = json.loads(message)
                 except json.JSONDecodeError:
@@ -367,6 +373,96 @@ class MockDshServer:
         stats['bytes_tx'] += len(data)
         await ws.send(data)
         logger.info(f"📤 发送: {frame.get('type', '?')} ({len(data)} bytes)")
+
+    async def _send_binary(self, ws, data: bytes):
+        """发送 WS Binary 帧 (W3: ASR 结果回放/下行 TTS 占位)"""
+        stats['frames_tx'] += 1
+        stats['bytes_tx'] += len(data)
+        await ws.send(data)
+        logger.info(f"📦 发送 Binary: {len(data)} bytes")
+
+    async def _handle_audio_binary(self, ws, session, opus_frame: bytes):
+        """W3: 处理 P4C5 上行的 OPUS 音频帧 (WS Binary)
+
+        设计 (POC 阶段, Mock ASR):
+          - 累计收到的 OPUS 字节数 (代替真实 ASR)
+          - 当累计超过 VAD_END_HOLD_MS 持续无新帧 OR 收到 audio 控制帧 (action=end)
+            时触发"识别"完成
+          - "识别"结果: 直接把累计字节数 + 时长包装成识别文字
+          - 然后用这条文字作为 user_input 上行到 mock LLM, 触发完整 18 帧对话流
+
+        简化:
+          - 不做真实 OPUS 解码 (POC 阶段)
+          - 不做真实 VAD (按帧累积, 5s 超时强制触发)
+          - 不调阿里云 ISI (避免需要 access key)
+
+        完整版 (后续):
+          - 用 opuslib 解码 → PCM
+          - VAD RMS 检测静音
+          - 阿里云 DashScope 流式 ASR
+        """
+        if not hasattr(session, 'audio_buf'):
+            session.audio_buf = []
+            session.audio_bytes = 0
+            session.audio_started_at = time.time()
+            session.audio_frames = 0
+
+        session.audio_buf.append(opus_frame)
+        session.audio_bytes += len(opus_frame)
+        session.audio_frames += 1
+
+        # 日志 (每 50 帧打印一次, 避免刷屏)
+        if session.audio_frames % 50 == 1:
+            elapsed = time.time() - session.audio_started_at
+            logger.info(f"🎤 [audio] frame #{session.audio_frames} "
+                        f"len={len(opus_frame)} bytes, "
+                        f"total={session.audio_bytes} bytes, "
+                        f"elapsed={elapsed:.1f}s")
+
+        # VAD_END_HOLD_MS 等价: 收到 100 帧即触发 (POC 简化, 模拟"按住语音键松手")
+        # 实际生产: 需要 P4C5 发 audio 控制帧 action=end
+        if session.audio_frames >= 100:
+            await self._mock_asr_finalize(ws, session)
+            return
+
+    async def _mock_asr_finalize(self, ws, session):
+        """POC: 模拟 ASR 识别完成, 上行 user_input 触发完整对话流"""
+        duration = time.time() - session.audio_started_at
+        opus_kbps_est = (session.audio_bytes * 8 / 1024) / duration if duration > 0 else 0
+
+        # 模拟 ASR 识别结果 (POC 阶段, 不做真实解码)
+        recognized_text = (
+            f"[Mock-ASR] 收到 {session.audio_bytes} bytes OPUS, "
+            f"{session.audio_frames} 帧, {duration:.1f}s, "
+            f"约 {opus_kbps_est:.1f} kbps"
+        )
+
+        logger.info(f"🎯 [mock-asr] 识别完成: \"{recognized_text}\"")
+        logger.info(f"   ↑ 上行 user_input → 触发 mock LLM 完整对话流")
+
+        # 重置 buffer (避免重复触发)
+        session.audio_buf = []
+        session.audio_bytes = 0
+        session.audio_frames = 0
+        session.audio_started_at = time.time()
+
+        # ★ 用识别文字作为 user_input 上行, 让 mock LLM 完整对话流跑起来
+        await ws.send(json.dumps(make_frame(
+            "client/user_input",
+            session_id=session.session_id,
+            text=recognized_text,
+            source="mock_asr",
+            duration_ms=int(duration * 1000),
+        )))
+
+        # 等待 mock LLM 处理
+        await asyncio.sleep(0.5)
+
+        # ★ 触发 mock LLM 完整对话流 (复用 _handle_user_input 内部逻辑)
+        await self._handle_user_input(ws, session, {
+            'text': recognized_text,
+            'source': 'mock_asr',
+        })
 
     def _truncate(self, data, max_len=80):
         """截断 JSON 用于日志显示"""
