@@ -10,14 +10,14 @@ dependencies:
   lvgl/lvgl: "~9.4.0"                       # LVGL 图形库
   espressif/esp_lvgl_adapter: "^0.2.0"      # T16: VSYNC tear-avoidance for MIPI DSI (num_fbs 自动计算)
   espressif/esp_lcd_touch_st7123: "^1.0.0"  # ST7123 触摸驱动
-  # espressif/esp_hosted:                       # P4↔C5 WiFi 协处理（M5 暂时禁用）
-  #   version: "2.12.3"
-  #   rules:
-  #     - if: target in [esp32p4]
-  # espressif/esp_wifi_remote:                  # WiFi remote（M5 暂时禁用）
-  #   version: "1.4.0"
-  #   rules:
-  #     - if: target in [esp32p4]
+  espressif/esp_hosted:                       # W1: P4↔C5 WiFi 协处理 (SDIO)
+    version: "2.12.3"
+    rules:
+      - if: target in [esp32p4]
+  espressif/esp_wifi_remote:                  # W1: WiFi remote (esp_hosted 依赖)
+    version: "1.4.0"
+    rules:
+      - if: target in [esp32p4]
 
   ## ── 本项目自定义组件（路径引用） ──
   p4c5_board:

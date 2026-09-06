@@ -211,7 +211,7 @@ void app_main(void)
 
     /* 启动 WiFi (硬编码 SSID 测试) */
     wifi_manager_config_t wifi_cfg = {
-        .sta_ssid = "ZTE-SONG-5G",                // 用户家 WiFi (5GHz Wi-Fi 6)
+        .sta_ssid = "ZTE-SONG-2.4G",              // 2.4GHz (C5 兼容性更好)
         .sta_password = "51UPSONG99",          // 用户家 WiFi 密码
         .ap_ssid_prefix = "p4c5-agent",
         .ap_ssid = NULL,
@@ -279,5 +279,22 @@ void app_main(void)
                  wifi_st.sta_connected ? "connected" : "disconnected",
                  wifi_st.sta_ip ? wifi_st.sta_ip : "0.0.0.0",
                  wifi_st.mode ? wifi_st.mode : "off");
+
+        /* 每 30s 扫描一次附近 AP 看实际能看到什么 */
+        static int scan_count = 0;
+        if (++scan_count % 3 == 0) {
+            wifi_manager_scan_record_t records[10];
+            uint16_t count = 0;
+            if (wifi_manager_scan_aps(records, 10, &count) == ESP_OK && count > 0) {
+                ESP_LOGI(TAG, "📡 Found %d APs:", count);
+                for (int i = 0; i < count && i < 10; i++) {
+                    ESP_LOGI(TAG, "  [%d] SSID='%s' RSSI=%d auth=%d ch=%d",
+                             i, records[i].ssid, records[i].rssi,
+                             records[i].authmode, records[i].primary);
+                }
+            } else {
+                ESP_LOGW(TAG, "📡 Scan failed or no AP found");
+            }
+        }
     }
 }
