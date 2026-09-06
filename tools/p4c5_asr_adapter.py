@@ -459,17 +459,29 @@ class P4C5ASRServer:
 
     接收 ESP32 WS Binary (opus) → VAD → ASR → 上行 user_input 到 DSH
     复刻 OMT tab5-adapter/adapter.js 整体架构
+
+    W5+ 冒烟测试模式:
+      --no-upstream 跳过 DSH 上行 (纯本地 ASR 验证)
+      --echo        识别后把文字作为 assistant_text 帧回 ESP32
     """
 
     def __init__(self, port: int = 8766, asr_engine: ASREngine = None,
-                 upstream_url: str = "ws://127.0.0.1:8765/ws"):
+                 upstream_url: str = "ws://127.0.0.1:8765/ws",
+                 no_upstream: bool = False,
+                 echo: bool = False):
         self.port = port
         self.asr = asr_engine or MockASREngine()
         self.upstream_url = upstream_url
+        self.no_upstream = no_upstream
+        self.echo = echo
         self.upstream_ws: Optional[websockets.WebSocketClientProtocol] = None
+        self.esp32_clients = set()  # 所有连接的 ESP32 客户端 (用于 echo)
 
     async def connect_upstream(self):
         """连接到上游 DSH (mock_dsh_server.py 或真实 DSH Adapter)"""
+        if self.no_upstream:
+            logger.info("  ↗  [no-upstream 模式] 跳过 upstream 连接, 纯本地 ASR 验证")
+            return
         logger.info(f"  ↗  上行到 mock_dsh: {self.upstream_url}")
         self.upstream_ws = await websockets.connect(self.upstream_url)
         await self.upstream_ws.send(json.dumps({
@@ -479,24 +491,47 @@ class P4C5ASRServer:
         logger.info(f"👋 hello: p4c5_asr_adapter")
 
     async def on_text(self, text: str, meta: dict):
-        """VAD finalize → ASR 识别 → 上行 user_input 到 mock_dsh"""
-        if not self.upstream_ws:
-            logger.warning("upstream 未连接, 丢弃识别结果")
-            return
-        try:
-            await self.upstream_ws.send(json.dumps({
-                "type": "client/user_input",
-                "text": text,
-                "duration_ms": meta.get("duration_ms", 0),
-            }))
-            logger.info(f"💬 上行 user_input: \"{text[:50]}\"")
-        except Exception as e:
-            logger.error(f"upstream 发送失败: {e}")
+        """VAD finalize → ASR 识别 → 处理结果
+
+        行为:
+          1. 总是打印识别文字到日志 (用户能看到麦克风 + ASR 工作)
+          2. 默认: 上行 user_input 到 mock_dsh
+          3. --echo: 把识别文字作为 assistant_text 帧回 ESP32
+        """
+        duration_ms = meta.get("duration_ms", 0)
+        logger.info(f"📝 识别结果: \"{text}\" ({duration_ms}ms)")
+
+        # 上行到 mock_dsh (默认)
+        if not self.no_upstream and self.upstream_ws:
+            try:
+                await self.upstream_ws.send(json.dumps({
+                    "type": "client/user_input",
+                    "text": text,
+                    "duration_ms": duration_ms,
+                }))
+                logger.info(f"💬 上行 user_input → mock_dsh")
+            except Exception as e:
+                logger.error(f"upstream 发送失败: {e}")
+
+        # echo 模式: 把识别文字回 ESP32 (让 ESP32 串口显示)
+        if self.echo and self.esp32_clients:
+            for client in list(self.esp32_clients):
+                try:
+                    await client.send(json.dumps({
+                        "type": "assistant_text",
+                        "content": f"你说的是: {text}",
+                        "echo": True,
+                        "duration_ms": duration_ms,
+                    }))
+                    logger.info(f"📤 echo 文字给 ESP32 (clients={len(self.esp32_clients)})")
+                except websockets.ConnectionClosed:
+                    self.esp32_clients.discard(client)
 
     async def handle_p4c5_client(self, ws):
         """处理 ESP32 P4C5 上行 OPUS 音频"""
         remote = ws.remote_address
         logger.info(f"✅ 新连接: {remote}")
+        self.esp32_clients.add(ws)
 
         # 准备 OPUS 解码器
         decoder = OpusDecoder() if HAS_OPUS else MockOpusDecoder()
@@ -534,6 +569,7 @@ class P4C5ASRServer:
         except websockets.ConnectionClosed:
             pass
         finally:
+            self.esp32_clients.discard(ws)
             logger.info(f"❌ 断开: {remote}")
 
     async def run(self, host: str = "0.0.0.0"):
@@ -542,7 +578,12 @@ class P4C5ASRServer:
         logger.info(f"   监听: ws://{host}:{self.port}")
         logger.info(f"   ASR 引擎: {type(self.asr).__name__}")
         logger.info(f"   OPUS 解码: {'opuslib' if HAS_OPUS else 'mock'}")
-        logger.info(f"   上行 upstream: {self.upstream_url}")
+        if self.no_upstream:
+            logger.info(f"   ⏭  upstream: 已禁用 (冒烟测试模式)")
+        else:
+            logger.info(f"   ↗  upstream: {self.upstream_url}")
+        if self.echo:
+            logger.info(f"   📤 echo 模式: ON (识别文字会回 ESP32 串口)")
 
         await self.connect_upstream()
 
@@ -564,6 +605,10 @@ def main():
                         help="DSH upstream 地址")
     parser.add_argument("--mock", action="store_true",
                         help="Mock ASR 模式 (无需阿里云 key)")
+    parser.add_argument("--no-upstream", action="store_true",
+                        help="跳过 upstream 上行 (纯本地 ASR 冒烟测试)")
+    parser.add_argument("--echo", action="store_true",
+                        help="识别文字回 ESP32 串口 (assistant_text 帧)")
     args = parser.parse_args()
 
     # 选择 ASR 引擎 (与 OMT asr.js 的"无 key 报错"对比, 我们加 mock 模式)
@@ -584,6 +629,8 @@ def main():
         port=args.port,
         asr_engine=asr,
         upstream_url=args.upstream,
+        no_upstream=args.no_upstream,
+        echo=args.echo,
     )
     try:
         asyncio.run(server.run(args.host))
