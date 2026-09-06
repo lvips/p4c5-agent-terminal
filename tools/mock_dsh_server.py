@@ -31,7 +31,16 @@ from datetime import datetime
 
 try:
     import websockets
-    from websockets.server import serve
+    # 新版 websockets (>=12.0) 使用 asyncio.server
+    try:
+        from websockets.asyncio.server import serve
+        from websockets.asyncio.server import ServerConnection
+        from websockets.http11 import Response
+    except ImportError:
+        # 旧版 websockets
+        from websockets.server import serve
+        ServerConnection = None
+        Response = None
 except ImportError:
     print("错误: 请先安装 websockets 库")
     print("  pip install websockets")
@@ -339,14 +348,33 @@ class MockDshServer:
         logger.info("  Ctrl+C 停止服务器")
         logger.info("")
 
+        # 路径检查：只接受 /ws（兼容 ESP32-P4 dsh_client）
+        async def process_request(conn, request):
+            req_path = getattr(request, 'path', None)
+            if req_path is None and hasattr(request, 'headers'):
+                # legacy API: 从 headers 解析
+                req_path = request.headers.get('Path', '/')
+            if req_path is None:
+                req_path = '/'
+            if req_path != '/ws':
+                logger.warning(f"拒绝路径: {req_path} (期望 /ws)")
+                if Response is not None:
+                    return Response(404, "Not Found: please use /ws path\n")
+            return None  # 继续处理
+
+        serve_kwargs = dict(
+            ping_interval=30,
+            ping_timeout=60,
+            max_size=65536,
+        )
+        if Response is not None:
+            serve_kwargs['process_request'] = process_request
+
         async with serve(
             self.handle_client,
             self.host,
             self.port,
-            path='/ws',
-            ping_interval=30,
-            ping_timeout=60,
-            max_size=65536,  # 支持大帧测试
+            **serve_kwargs,
         ):
             # 启动统计打印任务
             asyncio.create_task(self.stats_printer())
