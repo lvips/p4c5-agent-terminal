@@ -28,6 +28,7 @@
 #include <esp_lcd_st7102.h>
 #include <esp_lcd_touch_st7123.h>
 #include <esp_ldo_regulator.h>
+#include <esp_lv_adapter.h>    /* T16: for esp_lv_adapter_get_required_frame_buffer_count */
 
 static const char* TAG = "p4c5_display";
 
@@ -176,7 +177,13 @@ esp_err_t p4c5_display_init(void)
     dpi_cfg.dpi_clock_freq_mhz = 37.8f;
     dpi_cfg.virtual_channel = 0;
     dpi_cfg.pixel_format = LCD_COLOR_PIXEL_FORMAT_RGB565;
-    dpi_cfg.num_fbs = 1;
+    /* 🔴 T16 修复: 用 esp_lv_adapter 计算所需 FB 数
+     * MIPI DSI 默认 TRIPLE_PARTIAL 模式 → 3 个 FB (1.5MB PSRAM)
+     * 解决 DSI 流式读取与 LVGL flush DMA 的 PSRAM 带宽争用 */
+    dpi_cfg.num_fbs = esp_lv_adapter_get_required_frame_buffer_count(
+        ESP_LV_ADAPTER_TEAR_AVOID_MODE_DEFAULT_MIPI_DSI,
+        ESP_LV_ADAPTER_ROTATE_0);
+    ESP_LOGI(TAG, "DPI num_fbs = %d (T16 tear-avoidance)", dpi_cfg.num_fbs);
     dpi_cfg.video_timing.h_size = 480;
     dpi_cfg.video_timing.v_size = 800;
     dpi_cfg.video_timing.hsync_back_porch = 40;
@@ -279,6 +286,11 @@ void p4c5_display_deinit(void)
 void* p4c5_display_get_panel(void)
 {
     return (void*)s_panel;
+}
+
+void* p4c5_display_get_panel_io(void)
+{
+    return (void*)s_panel_io;
 }
 
 void* p4c5_display_get_touch(void)

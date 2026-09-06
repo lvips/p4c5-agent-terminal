@@ -1,24 +1,29 @@
 /**
  * @file p4c5_ui.c
- * @brief T14 — 生产级 LVGL v9 UI 实现
+ * @brief T16 — 生产级 LVGL v9 UI（基于 espressif/esp_lvgl_adapter）
  *
  * 设计：
- *   - 复用 p4c5_display 已初始化的 esp_lcd_panel_handle_t 和
- *     esp_lcd_touch_handle_t（不重新初始化 LCD / 触摸）
- *   - LVGL v9 API：lv_display / lv_indev / lv_obj
- *   - 所有 LVGL UI 写操作经同一 FreeRTOS mutex 串行化
- *   - lv_tick_inc(5) 由独立 5ms tick task 驱动（无锁，lv_tick_inc 线程安全）
- *   - lv_timer_handler() 由独立 task 驱动，锁内调用
+ *   - 使用 esp_lvgl_adapter 组件统一管理 LVGL 生命周期
+ *     （替代 T15 的手写 3-task 模型）
+ *   - esp_lv_adapter 自动处理：
+ *     * lv_init()
+ *     * lv_tick_inc()
+ *     * lv_timer_handler()
+ *     * flush_cb（内部实现 VSYNC 同步 + multi-FB 切换）
+ *     * 触摸 read_cb（通过 esp_lcd_touch 标准 API）
+ *     * 线程安全锁
+ *   - DSI underrun 根治：
+ *     * p4c5_display 创建面板时 num_fbs = 3（三缓冲，见 p4c5_display.cc）
+ *     * esp_lv_adapter 以 TRIPLE_PARTIAL 模式渲染
+ *     * DSI 持续读 FB[i]，LVGL 渲染到 FB[j] (i≠j)，无带宽争用
  *
  * 线程模型：
- *   - Task A: lvgl_timer (优先级 2)
- *       lock -> lv_timer_handler() -> flush_cb -> unlock
- *   - Task B: ui_update (优先级 3, 1s 周期)
- *       lock -> lv_label_set_text* -> unlock
- *   - Task C: lvgl_tick (最高优先级, 5ms 周期)
- *       lv_tick_inc(5)  // 无锁，官方声明线程安全
+ *   - esp_lv_adapter 内部创建一个 LVGL task（默认 8KB stack, priority 6）
+ *     负责 tick + timer + flush + touch polling
+ *   - ui_update task（我们创建，1s 周期，优先级 3）
+ *     经 esp_lv_adapter_lock 后更新 label 文字
  *
- * 外部调用 p4c5_ui_set_message/set_status 也走锁。
+ * 外部 API（p4c5_ui_set_message/set_status）也走 adapter lock。
  */
 
 #include "p4c5_ui.h"
@@ -31,26 +36,25 @@
 #include "config.h"
 
 #include <esp_log.h>
-#include <esp_lcd_panel_ops.h>
+#include <esp_check.h>
 #include <esp_lcd_touch.h>
-#include <esp_heap_caps.h>
+#include <esp_lv_adapter.h>
 #include <lvgl.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "freertos/semphr.h"
 #include <string.h>
 #include <stdio.h>
 
 static const char *TAG = "p4c5_ui";
 
 /* ── 内部状态 ── */
-static lv_display_t         *s_disp        = NULL;
-static lv_indev_t           *s_touch_in    = NULL;
-static esp_lcd_panel_handle_t s_panel      = NULL;
-static esp_lcd_touch_handle_t s_touch      = NULL;
-static SemaphoreHandle_t     s_lvgl_mutex  = NULL;
-static bool                  s_ui_ready    = false;
+static lv_display_t           *s_disp    = NULL;
+static lv_indev_t             *s_touch_in = NULL;
+static esp_lcd_panel_handle_t  s_panel   = NULL;
+static esp_lcd_panel_io_handle_t s_panel_io = NULL;
+static esp_lcd_touch_handle_t  s_touch   = NULL;
+static bool                    s_ui_ready = false;
 
 /* ── UI 控件句柄 ── */
 static lv_obj_t *s_lbl_bat    = NULL;
@@ -63,13 +67,7 @@ static lv_obj_t *s_lbl_status = NULL;
 /* ── 配置 ── */
 #define UI_WIDTH         P4C5_LCD_WIDTH      /* 480 */
 #define UI_HEIGHT        P4C5_LCD_HEIGHT     /* 800 */
-/* Partial buffer: 40 lines in internal SRAM (480*40*2 = 38.4KB)
- * 选择内部 SRAM 避免与 DSI 流式读取 PSRAM 争带宽。
- * LVGL 渲染到 SRAM → flush cb 通过 DMA 复制到面板 (面板仍从 PSRAM 流读)。
- * 40 行 ≈ 每帧 ~150 KB DMA，PSRAM 带宽足够。 */
-#define UI_BUF_LINES     40
 #define UI_UPDATE_PERIOD 1000                /* 1s 刷新一次状态 */
-#define UI_TICK_PERIOD   5                   /* 5 ms tick */
 
 /* ── 颜色（RGB565 友好） ── */
 #define COL_BG           lv_color_hex(0x1a1a1a)
@@ -81,65 +79,11 @@ static lv_obj_t *s_lbl_status = NULL;
 #define COL_MSG_BG       lv_color_hex(0x262626)
 
 /* ── 前向声明 ── */
-static void lvgl_timer_task(void *arg);
-static void lvgl_tick_task(void *arg);
 static void ui_update_task(void *arg);
 
 /* ════════════════════════════════════════════════════════════════
- * LVGL flush callback
- * LVGL render task 调用；把像素数据通过 esp_lcd 写到屏幕。
- * 注意：在 s_lvgl_mutex 锁内调用（由 lvgl_timer_task 持有）。
- * ════════════════════════════════════════════════════════════════ */
-static void ui_flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map)
-{
-    if (!s_panel) {
-        lv_display_flush_ready(disp);
-        return;
-    }
-    int32_t w = area->x2 - area->x1 + 1;
-    int32_t h = area->y2 - area->y1 + 1;
-    esp_lcd_panel_draw_bitmap(s_panel,
-                              area->x1, area->y1,
-                              area->x1 + w, area->y1 + h,
-                              px_map);
-    lv_display_flush_ready(disp);
-}
-
-/* ════════════════════════════════════════════════════════════════
- * 触摸 read callback
- * LVGL 定时器 task 调用（在锁内），从 ST7123 读坐标。
- * 调用栈：lvgl_timer_task(locked) -> lv_timer_handler -> indev_read -> 这里
- * ════════════════════════════════════════════════════════════════ */
-static void ui_touch_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
-{
-    if (!s_touch) {
-        data->state = LV_INDEV_STATE_RELEASED;
-        return;
-    }
-    if (esp_lcd_touch_read_data(s_touch) != ESP_OK) {
-        data->state = LV_INDEV_STATE_RELEASED;
-        return;
-    }
-    uint16_t x = 0, y = 0;
-    uint16_t strength = 0;
-    uint8_t  point_num = 0;
-    /* 读坐标 — 使用 deprecated esp_lcd_touch_get_coordinates 兼容当前组件版本 */
-    if (!esp_lcd_touch_get_coordinates(s_touch, &x, &y, &strength, &point_num, 1)) {
-        data->state = LV_INDEV_STATE_RELEASED;
-        return;
-    }
-    if (point_num == 0) {
-        data->state = LV_INDEV_STATE_RELEASED;
-        return;
-    }
-    data->state = LV_INDEV_STATE_PRESSED;
-    data->point.x = x;
-    data->point.y = y;
-}
-
-/* ════════════════════════════════════════════════════════════════
  * 按钮事件：按下 = 开始监听，松开 = 停止监听
- * 在锁内调用（LVGL event callback 由 timer task 派发）
+ * 在 adapter lock 内调用（LVGL event callback 由 adapter task 派发）
  * ════════════════════════════════════════════════════════════════ */
 static void btn_talk_event_cb(lv_event_t *e)
 {
@@ -158,7 +102,7 @@ static void btn_talk_event_cb(lv_event_t *e)
 }
 
 /* ════════════════════════════════════════════════════════════════
- * UI 控件创建（在 s_disp / s_touch_in 建立后，锁内调用）
+ * UI 控件创建（adapter 已建立 display/touch，锁内调用）
  * ════════════════════════════════════════════════════════════════ */
 static void ui_create(void)
 {
@@ -238,26 +182,8 @@ static void ui_create(void)
 }
 
 /* ════════════════════════════════════════════════════════════════
- * 后台任务
+ * 后台任务：1 秒状态刷新
  * ════════════════════════════════════════════════════════════════ */
-
-/* LVGL timer handler — 优先级 2，低于 ui_update 但高于 tick */
-static void lvgl_timer_task(void *arg)
-{
-    while (1) {
-        if (p4c5_ui_lock_with_timeout(200)) {
-            uint32_t idle = lv_timer_handler();
-            p4c5_ui_unlock();
-            if (idle > 100) idle = 100;
-            if (idle < 5)   idle = 5;
-            vTaskDelay(pdMS_TO_TICKS(idle));
-        } else {
-            vTaskDelay(pdMS_TO_TICKS(10));
-        }
-    }
-}
-
-/* 1 秒状态刷新 */
 static void ui_update_task(void *arg)
 {
     char buf[128];
@@ -266,7 +192,7 @@ static void ui_update_task(void *arg)
         vTaskDelay(pdMS_TO_TICKS(50));
     }
     while (1) {
-        if (p4c5_ui_lock_with_timeout(100)) {
+        if (esp_lv_adapter_lock(100) == ESP_OK) {
             /* 电量 */
             if (s_lbl_bat) {
                 uint8_t bat = p4c5_pmic_get_battery_level();
@@ -289,39 +215,29 @@ static void ui_update_task(void *arg)
                          conn ? "Connected [OK]" : "Disconnected");
                 lv_label_set_text(s_lbl_dsh, buf);
             }
-            p4c5_ui_unlock();
+            esp_lv_adapter_unlock();
         }
         vTaskDelay(pdMS_TO_TICKS(UI_UPDATE_PERIOD));
     }
 }
 
-/* 5 ms tick — 最高优先级，无锁（lv_tick_inc 官方声明线程安全） */
-static void lvgl_tick_task(void *arg)
-{
-    while (1) {
-        lv_tick_inc(UI_TICK_PERIOD);
-        vTaskDelay(pdMS_TO_TICKS(UI_TICK_PERIOD));
-    }
-}
-
 /* ════════════════════════════════════════════════════════════════
- * 公开 API
+ * 公开 API（lock 直接走 esp_lv_adapter）
  * ════════════════════════════════════════════════════════════════ */
 
 void p4c5_ui_lock(void)
 {
-    if (s_lvgl_mutex) xSemaphoreTake(s_lvgl_mutex, portMAX_DELAY);
+    esp_lv_adapter_lock(-1);
 }
 
 bool p4c5_ui_lock_with_timeout(uint32_t timeout_ms)
 {
-    if (!s_lvgl_mutex) return false;
-    return xSemaphoreTake(s_lvgl_mutex, pdMS_TO_TICKS(timeout_ms)) == pdTRUE;
+    return esp_lv_adapter_lock((int32_t)timeout_ms) == ESP_OK;
 }
 
 void p4c5_ui_unlock(void)
 {
-    if (s_lvgl_mutex) xSemaphoreGive(s_lvgl_mutex);
+    esp_lv_adapter_unlock();
 }
 
 void p4c5_ui_set_message(const char *text)
@@ -363,85 +279,69 @@ esp_err_t p4c5_ui_init(void)
     }
 
     /* 从 p4c5_display 取已初始化的句柄 */
-    s_panel = (esp_lcd_panel_handle_t)p4c5_display_get_panel();
-    s_touch = (esp_lcd_touch_handle_t)p4c5_display_get_touch();
+    s_panel   = (esp_lcd_panel_handle_t)p4c5_display_get_panel();
+    s_panel_io = (esp_lcd_panel_io_handle_t)p4c5_display_get_panel_io();
+    s_touch   = (esp_lcd_touch_handle_t)p4c5_display_get_touch();
     if (!s_panel) {
         ESP_LOGE(TAG, "Display panel not available (p4c5_display not init?)");
         return ESP_ERR_INVALID_STATE;
     }
-    ESP_LOGI(TAG, "Panel handle: %p, Touch handle: %p", s_panel, s_touch);
+    ESP_LOGI(TAG, "Panel=%p, panel_io=%p, Touch=%p", s_panel, s_panel_io, s_touch);
 
-    /* 1. LVGL 初始化 */
-    lv_init();
-    ESP_LOGI(TAG, "lv_init() done (LVGL %d.%d.%d)",
+    /* 1. 初始化 esp_lv_adapter（内部调用 lv_init） */
+    esp_lv_adapter_config_t adapter_cfg = ESP_LV_ADAPTER_DEFAULT_CONFIG();
+    adapter_cfg.task_stack_size = 10 * 1024;   /* 10KB stack */
+    adapter_cfg.task_priority   = 6;           /* 中等偏高 */
+    adapter_cfg.stack_in_psram  = true;        /* 任务栈放 PSRAM 节省内部 RAM */
+    ESP_RETURN_ON_ERROR(esp_lv_adapter_init(&adapter_cfg), TAG, "adapter init failed");
+    ESP_LOGI(TAG, "esp_lv_adapter initialized (LVGL %d.%d.%d)",
              LVGL_VERSION_MAJOR, LVGL_VERSION_MINOR, LVGL_VERSION_PATCH);
 
-    /* 2. 互斥锁 */
-    s_lvgl_mutex = xSemaphoreCreateMutex();
-    if (!s_lvgl_mutex) {
-        ESP_LOGE(TAG, "mutex alloc failed");
-        return ESP_ERR_NO_MEM;
-    }
-
-    /* 3. Display — RGB565 部分 buffer */
-    s_disp = lv_display_create(UI_WIDTH, UI_HEIGHT);
+    /* 2. 注册 display — MIPI DSI 默认用 TRIPLE_PARTIAL tear-avoidance */
+    esp_lv_adapter_display_config_t disp_cfg =
+        ESP_LV_ADAPTER_DISPLAY_MIPI_DEFAULT_CONFIG(
+            s_panel, s_panel_io, UI_WIDTH, UI_HEIGHT, ESP_LV_ADAPTER_ROTATE_0);
+    s_disp = esp_lv_adapter_register_display(&disp_cfg);
     if (!s_disp) {
-        ESP_LOGE(TAG, "lv_display_create failed");
+        ESP_LOGE(TAG, "register_display failed");
         return ESP_ERR_NO_MEM;
     }
-    lv_display_set_color_format(s_disp, LV_COLOR_FORMAT_RGB565);
+    ESP_LOGI(TAG, "LVGL display registered (MIPI DSI, TRIPLE_PARTIAL)");
 
-    /* 双 buffer 放在内部 SRAM，避免与 DSI 流式读 PSRAM 争带宽
-     * 40 行 = 480*40*2 = 38.4 KB each, 2 个 = 76.8 KB (内部 SRAM 够) */
-    const size_t buf_size = UI_WIDTH * UI_BUF_LINES * sizeof(lv_color16_t);
-    void *buf1 = heap_caps_malloc(buf_size, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
-    void *buf2 = heap_caps_malloc(buf_size, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
-    if (!buf1 || !buf2) {
-        ESP_LOGE(TAG, "LVGL buf alloc failed (need %u bytes internal)", (unsigned)buf_size);
-        if (buf1) free(buf1);
-        if (buf2) free(buf2);
-        return ESP_ERR_NO_MEM;
-    }
-    lv_display_set_buffers(s_disp, buf1, buf2, buf_size,
-                           LV_DISPLAY_RENDER_MODE_PARTIAL);
-    lv_display_set_flush_cb(s_disp, ui_flush_cb);
-    /* 降低 flush 频率（默认 33ms=30fps），改 100ms=10fps 降低 PSRAM 争带宽 */
-    lv_timer_t *refr_timer = lv_display_get_refr_timer(s_disp);
-    if (refr_timer) {
-        lv_timer_set_period(refr_timer, 100);
-    }
-    ESP_LOGI(TAG, "LVGL display: %dx%d, 2x %u byte bufs (internal SRAM), 100ms refr",
-             UI_WIDTH, UI_HEIGHT, (unsigned)buf_size);
-
-    /* 4. 触摸 input device */
+    /* 3. 注册 touch input device */
     if (s_touch) {
-        s_touch_in = lv_indev_create();
+        esp_lv_adapter_touch_config_t touch_cfg =
+            ESP_LV_ADAPTER_TOUCH_DEFAULT_CONFIG(s_disp, s_touch);
+        s_touch_in = esp_lv_adapter_register_touch(&touch_cfg);
         if (s_touch_in) {
-            lv_indev_set_type(s_touch_in, LV_INDEV_TYPE_POINTER);
-            lv_indev_set_read_cb(s_touch_in, ui_touch_read_cb);
-            lv_indev_set_user_data(s_touch_in, s_touch);
             ESP_LOGI(TAG, "LVGL touch indev registered");
         } else {
-            ESP_LOGW(TAG, "lv_indev_create failed");
+            ESP_LOGW(TAG, "register_touch failed");
         }
     } else {
         ESP_LOGW(TAG, "Touch not available; UI will be static");
     }
 
-    /* 5. UI 控件（锁内） */
-    p4c5_ui_lock();
+    /* 4. 启动 adapter 内部 task (tick + timer + flush) */
+    ESP_RETURN_ON_ERROR(esp_lv_adapter_start(), TAG, "adapter start failed");
+
+    /* 5. UI 控件（adapter lock 内） */
+    esp_lv_adapter_lock(-1);
+    /* 设置 LVGL 默认主题（深蓝 + 红强调色） */
+    lv_theme_t *theme = lv_theme_default_init(
+        s_disp,
+        lv_palette_main(LV_PALETTE_BLUE),
+        lv_palette_main(LV_PALETTE_RED),
+        true,                              /* light mode */
+        &lv_font_montserrat_14);
+    lv_display_set_theme(s_disp, theme);
     ui_create();
-    p4c5_ui_unlock();
+    esp_lv_adapter_unlock();
     s_ui_ready = true;
 
-    /* 6. 启动后台任务 */
-    /* tick task：最高优先级，保证 LVGL 时间基准稳定 */
-    xTaskCreate(lvgl_tick_task, "lvgl_tick", 2048, NULL, configMAX_PRIORITIES - 1, NULL);
-    /* timer task：处理 LVGL 动画、flush、事件派发 */
-    xTaskCreate(lvgl_timer_task, "lvgl_timer", 6144, NULL, 2, NULL);
-    /* status update：1s 周期，优先级略高 */
+    /* 6. 启动状态刷新 task */
     xTaskCreate(ui_update_task, "ui_update", 4096, NULL, 3, NULL);
 
-    ESP_LOGI(TAG, "p4c5_ui initialized ✅ (3 tasks: tick/timer/update)");
+    ESP_LOGI(TAG, "p4c5_ui initialized ✅ (esp_lv_adapter manages LVGL task)");
     return ESP_OK;
 }

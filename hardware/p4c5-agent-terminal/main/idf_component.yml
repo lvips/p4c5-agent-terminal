@@ -8,6 +8,7 @@ dependencies:
   # 78/uart-uhci 由 esp-ml307 v3.5.3 内部提供，无需显式声明
   # 78/esp-wifi-connect: "~3.1.1"             # WiFi 连接管理（M5 暂时禁用）
   lvgl/lvgl: "~9.4.0"                       # LVGL 图形库
+  espressif/esp_lvgl_adapter: "^0.2.0"      # T16: VSYNC tear-avoidance for MIPI DSI (num_fbs 自动计算)
   espressif/esp_lcd_touch_st7123: "^1.0.0"  # ST7123 触摸驱动
   # espressif/esp_hosted:                       # P4↔C5 WiFi 协处理（M5 暂时禁用）
   #   version: "2.12.3"
@@ -42,4 +43,4 @@ dependencies:
 
   ## ── IDF 版本 ──
   idf:
-    version: ">=5.4.0"
+    version: ">=5.5.0"                    # esp_lvgl_adapter ^0.2.0 要求 IDF >= 5.5

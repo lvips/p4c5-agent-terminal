@@ -1,21 +1,15 @@
-# p4c5_ui — minimal LVGL v9 UI for p4c5-agent-terminal
+# p4c5_ui — LVGL v9 UI via espressif/esp_lvgl_adapter
 #
-# T14: Production UI replacing the 5-band test pattern.
-# Reuses esp_lcd_panel_handle_t + esp_lcd_touch_handle_t from p4c5_display.
-# Does NOT re-initialize the LCD or touch — just wraps them for LVGL.
+# T14: Initial production UI (hand-rolled 3-task model)
+# T16: Switched to esp_lvgl_adapter for proper MIPI DSI VSYNC handling.
+#   - esp_lv_adapter manages LVGL lifecycle (init/tick/timer/flush/touch)
+#   - p4c5_display creates panel with num_fbs=3 (triple buffering)
+#   - No PSRAM bandwidth contention between DSI stream and LVGL DMA
 #
-# LVGL APIs used (v9.4.0):
-#   lv_display_create / set_flush_cb / set_buffers / set_color_format
-#   lv_indev_create / set_type / set_user_data / set_read_cb
-#   lv_obj / lv_label / lv_btn / lv_timer / lv_tick_inc
-#   lv_mutex (FreeRTOS-backed)
-#
-# Thread model:
-#   - All LVGL calls (except lv_tick_inc) are serialized via the same mutex
-#     that protects the panel draw in the flush callback.
-#   - lv_tick_inc(5) is called from the 5 ms tick task (no LVGL API needed).
-#   - The flush callback runs on LVGL's internal render task; it draws via
-#     esp_lcd_panel_draw_bitmap (thread-safe at the esp_lcd layer).
+# Dependencies:
+#   - espressif__esp_lvgl_adapter: manages LVGL + flush + VSYNC
+#   - p4c5_display: provides panel/panel_io/touch handles
+#   - p4c5_pmic / p4c5_4g / dsh_client: status sources for UI update
 
 idf_component_register(
     SRCS "p4c5_ui.c"
@@ -24,6 +18,7 @@ idf_component_register(
         lvgl
         esp_lcd
         esp_lcd_touch
+        espressif__esp_lvgl_adapter
         esp_driver_gpio
         freertos
         p4c5_board

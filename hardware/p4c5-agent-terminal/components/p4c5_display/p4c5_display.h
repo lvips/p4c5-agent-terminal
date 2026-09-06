@@ -60,6 +60,12 @@ void p4c5_display_deinit(void);
 void* p4c5_display_get_panel(void);
 
 /**
+ * @brief 获取 LCD panel IO handle（T16: esp_lv_adapter 注册需要）
+ * @return panel_io handle，未初始化时返回 NULL
+ */
+void* p4c5_display_get_panel_io(void);
+
+/**
  * @brief 获取 ST7123 触摸 handle
  * @return touch handle，未初始化或失败返回 NULL
  */
