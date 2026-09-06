@@ -27,7 +27,7 @@
 /* ── 触摸 (ST7123 I2C) ── */
 #define P4C5_TP_INT_GPIO          GPIO_NUM_23
 #define P4C5_TP_I2C_PORT          I2C_NUM_0
-#define P4C5_TP_I2C_ADDR          0x5A
+#define P4C5_TP_I2C_ADDR          0x55   /* ST7123 触摸 (Espressif 组件默认地址) */
 
 /* ── 共享 I2C 总线 (I2C0) ── */
 #define P4C5_I2C_SDA_GPIO         GPIO_NUM_7

@@ -170,9 +170,22 @@ esp_err_t p4c5_display_init(void)
     ESP_RETURN_ON_ERROR(esp_lcd_new_panel_io_dbi(s_dsi_bus, &dbi_cfg, &s_panel_io),
                         TAG, "Panel IO failed");
 
-    /* 5. ST7102 panel (DPI) — 使用 xiaozhi 验证过的 DPI 配置宏 */
-    esp_lcd_dpi_panel_config_t dpi_cfg = ST7102_MIPI_480_800_PANEL_60HZ_DPI_CONFIG(LCD_COLOR_PIXEL_FORMAT_RGB565);
+    /* 5. ST7102 panel (DPI) — C++ 不能用 designated initializer 宏，手动配置 */
+    esp_lcd_dpi_panel_config_t dpi_cfg = {};
+    dpi_cfg.dpi_clk_src = MIPI_DSI_DPI_CLK_SRC_DEFAULT;
+    dpi_cfg.dpi_clock_freq_mhz = 37.8f;
+    dpi_cfg.virtual_channel = 0;
+    dpi_cfg.pixel_format = LCD_COLOR_PIXEL_FORMAT_RGB565;
     dpi_cfg.num_fbs = 1;
+    dpi_cfg.video_timing.h_size = 480;
+    dpi_cfg.video_timing.v_size = 800;
+    dpi_cfg.video_timing.hsync_back_porch = 40;
+    dpi_cfg.video_timing.hsync_pulse_width = 2;
+    dpi_cfg.video_timing.hsync_front_porch = 40;
+    dpi_cfg.video_timing.vsync_back_porch = 10;
+    dpi_cfg.video_timing.vsync_pulse_width = 2;
+    dpi_cfg.video_timing.vsync_front_porch = 310;
+    dpi_cfg.flags.use_dma2d = true;
 
     /* 🔴 T13 修复: 加载 ST7102 初始化命令（之前是 TODO 空数组，导致黑屏） */
     st7102_vendor_config_t vendor_cfg = {};
@@ -198,10 +211,14 @@ esp_err_t p4c5_display_init(void)
     i2c_master_bus_handle_t touch_i2c_bus = (i2c_master_bus_handle_t)p4c5_board_get_i2c_bus();
     esp_lcd_panel_io_handle_t tp_io = NULL;
     if (touch_i2c_bus) {
-        /* ⚠️ 使用项目 config.h 定义的地址 0x5A，而非 Espressif 默认的 0x55
-         * 酷世 P4C5 开发板 ST7123 地址 = 0x5A (见 p4c5_board.cc 注释) */
-        esp_lcd_panel_io_i2c_config_t tp_io_cfg = ESP_LCD_TOUCH_IO_I2C_ST7123_CONFIG();
-        tp_io_cfg.dev_addr = P4C5_TP_I2C_ADDR;   /* 0x5A */
+        /* ⚠️ C++ 不能用 ESP_LCD_TOUCH_IO_I2C_ST7123_CONFIG() 宏 (designator order)
+         * 手动初始化，使用项目 config.h 定义的地址 0x5A */
+        esp_lcd_panel_io_i2c_config_t tp_io_cfg = {};
+        tp_io_cfg.dev_addr = ESP_LCD_TOUCH_IO_I2C_ST7123_ADDRESS;   /* 0x55 — Espressif default */
+        tp_io_cfg.control_phase_bytes = 1;
+        tp_io_cfg.lcd_cmd_bits = 16;
+        tp_io_cfg.lcd_param_bits = 16;
+        tp_io_cfg.flags.disable_control_phase = 1;
         tp_io_cfg.scl_speed_hz = 400000;
 
         esp_err_t tp_io_err = esp_lcd_new_panel_io_i2c(touch_i2c_bus, &tp_io_cfg, &tp_io);
@@ -216,7 +233,7 @@ esp_err_t p4c5_display_init(void)
             };
             esp_err_t tp_err = esp_lcd_touch_new_i2c_st7123(tp_io, &tp_cfg, &s_touch);
             if (tp_err == ESP_OK) {
-                ESP_LOGI(TAG, "ST7123 touch initialized ✅ (addr=0x%02X)", P4C5_TP_I2C_ADDR);
+                ESP_LOGI(TAG, "ST7123 touch initialized ✅ (addr=0x%02X)", ESP_LCD_TOUCH_IO_I2C_ST7123_ADDRESS);
             } else {
                 ESP_LOGW(TAG, "ST7123 touch create failed: %s", esp_err_to_name(tp_err));
             }
