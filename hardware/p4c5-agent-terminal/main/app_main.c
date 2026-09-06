@@ -27,43 +27,108 @@
 
 static const char *TAG = "app_main";
 
-/* ── DSH 帧回调 ── */
+/* W2: 收到的最后一个 tool_call id (用于回 tool_result) */
+static char w2_last_tool_id[64] = {0};
+
+/* ── DSH 帧回调 (W2: 处理全部 14 类下行帧) ── */
 static void on_dsh_frame(const char *frame_type, cJSON *json, void *user_data)
 {
     if (strcmp(frame_type, "session_state") == 0) {
         cJSON *state = cJSON_GetObjectItem(json, "state");
-        ESP_LOGI(TAG, "📡 DSH session: %s",
+        ESP_LOGI(TAG, "📡 [down] session_state: %s",
                  cJSON_IsString(state) ? state->valuestring : "unknown");
 
+    } else if (strcmp(frame_type, "thinking") == 0) {
+        ESP_LOGI(TAG, "🤔 [down] thinking...");
+
     } else if (strcmp(frame_type, "assistant_text") == 0) {
-        cJSON *delta = cJSON_GetObjectItem(json, "delta");
+        cJSON *delta = cJSON_GetObjectItem(json, "content");
         if (cJSON_IsString(delta)) {
-            /* 流式文本输出 */
             printf("%s", delta->valuestring);
             fflush(stdout);
+        } else {
+            cJSON *d = cJSON_GetObjectItem(json, "delta");
+            if (cJSON_IsString(d)) { printf("%s", d->valuestring); fflush(stdout); }
         }
 
     } else if (strcmp(frame_type, "assistant_done") == 0) {
         printf("\n");
-        ESP_LOGI(TAG, "📝 Assistant done");
-
-    } else if (strcmp(frame_type, "thinking") == 0) {
-        ESP_LOGI(TAG, "🤔 Thinking...");
+        ESP_LOGI(TAG, "📝 [down] assistant_done");
 
     } else if (strcmp(frame_type, "tool_call") == 0) {
-        cJSON *name = cJSON_GetObjectItem(json, "name");
+        cJSON *name = cJSON_GetObjectItem(json, "tool_name");
+        if (!cJSON_IsString(name)) name = cJSON_GetObjectItem(json, "name");
         cJSON *id = cJSON_GetObjectItem(json, "id");
-        ESP_LOGI(TAG, "🔧 Tool call: %s (id=%s)",
+        /* W2: 保存 id 用于回 tool_result */
+        if (cJSON_IsString(id)) {
+            strncpy(w2_last_tool_id, id->valuestring, sizeof(w2_last_tool_id) - 1);
+            w2_last_tool_id[sizeof(w2_last_tool_id) - 1] = '\0';
+        }
+        ESP_LOGI(TAG, "🔧 [down] tool_call: %s (id=%s)",
                  cJSON_IsString(name) ? name->valuestring : "?",
                  cJSON_IsString(id) ? id->valuestring : "?");
 
+    } else if (strcmp(frame_type, "tool_result") == 0) {
+        cJSON *name = cJSON_GetObjectItem(json, "name");
+        cJSON *status = cJSON_GetObjectItem(json, "status");
+        ESP_LOGI(TAG, "🔧 [down] tool_result: %s status=%s",
+                 cJSON_IsString(name) ? name->valuestring : "?",
+                 cJSON_IsString(status) ? status->valuestring : "?");
+
+    } else if (strcmp(frame_type, "tool_progress") == 0) {
+        cJSON *id = cJSON_GetObjectItem(json, "id");
+        cJSON *elapsed = cJSON_GetObjectItem(json, "elapsed_seconds");
+        ESP_LOGI(TAG, "⏳ [down] tool_progress: id=%s elapsed=%s",
+                 cJSON_IsString(id) ? id->valuestring : "?",
+                 cJSON_IsNumber(elapsed) ? "yes" : "?");
+
+    } else if (strcmp(frame_type, "file_change") == 0) {
+        cJSON *path = cJSON_GetObjectItem(json, "path");
+        cJSON *change = cJSON_GetObjectItem(json, "change_type");
+        ESP_LOGI(TAG, "📁 [down] file_change: %s (%s)",
+                 cJSON_IsString(path) ? path->valuestring : "?",
+                 cJSON_IsString(change) ? change->valuestring : "?");
+
+    } else if (strcmp(frame_type, "authorization/requested") == 0) {
+        cJSON *id = cJSON_GetObjectItem(json, "id");
+        cJSON *tool = cJSON_GetObjectItem(json, "tool_name");
+        ESP_LOGI(TAG, "🔐 [down] auth_requested: %s (id=%s)",
+                 cJSON_IsString(tool) ? tool->valuestring : "?",
+                 cJSON_IsString(id) ? id->valuestring : "?");
+
+    } else if (strcmp(frame_type, "authorization/resolved") == 0) {
+        cJSON *id = cJSON_GetObjectItem(json, "id");
+        cJSON *decision = cJSON_GetObjectItem(json, "decision");
+        ESP_LOGI(TAG, "🔐 [down] auth_resolved: %s (id=%s)",
+                 cJSON_IsString(decision) ? decision->valuestring : "?",
+                 cJSON_IsString(id) ? id->valuestring : "?");
+
+    } else if (strcmp(frame_type, "question/requested") == 0) {
+        cJSON *id = cJSON_GetObjectItem(json, "id");
+        cJSON *q = cJSON_GetObjectItem(json, "question");
+        ESP_LOGI(TAG, "❓ [down] question_requested: %s (id=%s)",
+                 cJSON_IsString(q) ? q->valuestring : "?",
+                 cJSON_IsString(id) ? id->valuestring : "?");
+
+    } else if (strcmp(frame_type, "question/resolved") == 0) {
+        cJSON *id = cJSON_GetObjectItem(json, "id");
+        ESP_LOGI(TAG, "❓ [down] question_resolved (id=%s)",
+                 cJSON_IsString(id) ? id->valuestring : "?");
+
+    } else if (strcmp(frame_type, "file_upload") == 0) {
+        cJSON *uid = cJSON_GetObjectItem(json, "upload_id");
+        cJSON *url = cJSON_GetObjectItem(json, "target_url");
+        ESP_LOGI(TAG, "📤 [down] file_upload: %s → %s",
+                 cJSON_IsString(uid) ? uid->valuestring : "?",
+                 cJSON_IsString(url) ? url->valuestring : "?");
+
     } else if (strcmp(frame_type, "system_event") == 0) {
         cJSON *event = cJSON_GetObjectItem(json, "event");
-        ESP_LOGI(TAG, "⚙️ System event: %s",
+        ESP_LOGI(TAG, "⚙️ [down] system_event: %s",
                  cJSON_IsString(event) ? event->valuestring : "?");
 
     } else {
-        ESP_LOGD(TAG, "Frame: %s", frame_type);
+        ESP_LOGW(TAG, "❓ [down] unknown frame: %s", frame_type);
     }
 }
 
@@ -275,9 +340,29 @@ void app_main(void)
         /* W1-stable: heartbeat 显示 bat + WiFi 状态 */
         wifi_manager_status_t wifi_st = {0};
         wifi_manager_get_status(&wifi_st);
-        ESP_LOGI(TAG, "💓 bat=%u%% wifi=%s ip=%s", p4c5_pmic_get_battery_level(),
+        ESP_LOGI(TAG, "💓 bat=%u%% wifi=%s ip=%s dsh=%s", p4c5_pmic_get_battery_level(),
                  wifi_st.sta_connected ? "✅ connected" : "❌ disconnected",
-                 wifi_st.sta_ip ? wifi_st.sta_ip : "0.0.0.0");
+                 wifi_st.sta_ip ? wifi_st.sta_ip : "0.0.0.0",
+                 dsh_client_is_connected() ? "✅" : "❌");
+
+        /* W2: 每 20s 触发一次, 验证 mock server 完整对话流
+           (thinking → assistant_text → assistant_done → tool_call) */
+        static int w2_user_input_count = 0;
+        if (dsh_client_is_connected() && ++w2_user_input_count % 2 == 0) {
+            ESP_LOGI(TAG, "📤 [W2] 发送 client/user_input (#%d)", w2_user_input_count / 2);
+            dsh_client_send_user_input("W2 测试: 验证 mock server 完整对话流");
+        }
+
+        /* W2: 收到 tool_call 后自动回 client/tool_result (验证上行帧) */
+        if (dsh_client_is_connected() && w2_last_tool_id[0] != '\0') {
+            ESP_LOGI(TAG, "📤 [W2] 发送 client/tool_result (id=%s)", w2_last_tool_id);
+            cJSON *result = cJSON_CreateObject();
+            cJSON_AddStringToObject(result, "battery", "85%");
+            cJSON_AddStringToObject(result, "wifi_rssi", "-45dBm");
+            dsh_client_send_tool_result(w2_last_tool_id, result);
+            cJSON_Delete(result);
+            w2_last_tool_id[0] = '\0';  /* 单次回执 */
+        }
 #if 0  /* W1 disabled: dsh_client_is_connected 触发 lwIP */
         wifi_manager_status_t wifi_st = {0};
         wifi_manager_get_status(&wifi_st);

@@ -256,6 +256,9 @@ class MockDshServer:
         # 4. 模拟 tool_call（每 3 次用户输入触发一次）
         if session.message_counter % 3 == 0:
             await self._simulate_tool_call(ws, session)
+            await asyncio.sleep(0.3)
+            # W2: 完整发送剩余 7 类下行帧
+            await self._send_remaining_frames(ws, session)
 
         # 大帧测试
         if self.simulate_large_frame:
@@ -288,6 +291,65 @@ class MockDshServer:
             display={"title": "查询设备状态"}))
 
         logger.info(f"  🔧 发送 tool_call: {tool_id}")
+
+    async def _send_remaining_frames(self, ws, session):
+        """W2: 发送剩余的 6 类下行帧 (验证 14 类完整)"""
+        # 1. tool_result (server 中继)
+        await self._send(ws, make_frame("tool_result",
+            id="tool_mid_001",
+            name="web_search",
+            status="ok",
+            output="搜索结果: ESP32-P4 已发布 (Espressif 2024)"))
+        await asyncio.sleep(0.2)
+
+        # 2. file_change
+        await self._send(ws, make_frame("file_change",
+            path="/tmp/p4c5_data.bin",
+            change_type="modified",
+            size_bytes=4096))
+        await asyncio.sleep(0.2)
+
+        # 3. authorization/requested
+        auth_id = f"auth_{session.session_id}_{session.message_counter}"
+        await self._send(ws, make_frame("authorization/requested",
+            id=auth_id,
+            tool_name="git_push",
+            description="推送代码到远程仓库",
+            requires_user_approval=True))
+        await asyncio.sleep(0.2)
+
+        # 4. authorization/resolved (直接 resolve 上一个)
+        await self._send(ws, make_frame("authorization/resolved",
+            id=auth_id,
+            decision="approved",
+            reason="用户授权"))
+        await asyncio.sleep(0.2)
+
+        # 5. question/requested
+        q_id = f"q_{session.session_id}_{session.message_counter}"
+        await self._send(ws, make_frame("question/requested",
+            id=q_id,
+            question="请选择部署目标",
+            options=["生产环境", "测试环境", "取消"],
+            multi_select=False))
+        await asyncio.sleep(0.2)
+
+        # 6. question/resolved
+        await self._send(ws, make_frame("question/resolved",
+            id=q_id,
+            selected=["测试环境"]))
+        await asyncio.sleep(0.2)
+
+        # 7. file_upload (server 让 client 上传)
+        await self._send(ws, make_frame("file_upload",
+            upload_id=f"upload_{session.session_id}",
+            target_url="https://api.example.com/upload",
+            content_type="application/octet-stream",
+            size_bytes=2048,
+            checksum="sha256:abc123..."))
+        await asyncio.sleep(0.2)
+
+        logger.info(f"  📋 [W2] 发送剩余 7 类下行帧完成")
 
     async def _send_large_frame(self, ws, session):
         """发送大帧（>4096 字节），测试客户端多包拼接"""
