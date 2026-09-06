@@ -8,7 +8,7 @@
  * 关键设计决策：
  *   - 共享 I2C bus (I2C0): SDA=GPIO7, SCL=GPIO8
  *     挂载设备: AXP2101(0x34), ES8311(0x18), ES7210(0x40),
- *               ST7123(0x5A), LSM6DS3(0x6A), MCP4725(0x60)
+ *               ST7123(0x55) [修正: 之前误写0x5A], LSM6DS3(0x6A), MCP4725(0x60)
  *   - I2C handle 通过 p4c5_board_get_i2c_bus() 暴露给各子系统
  */
 
