@@ -20,10 +20,12 @@ static const char *TAG = "dsh_ws";
 
 /* ── 内部状态 ── */
 static esp_websocket_client_handle_t s_ws = NULL;
-static dsh_ws_json_cb_t  s_json_cb      = NULL;
-static void             *s_json_cb_data = NULL;
-static dsh_ws_state_cb_t s_state_cb      = NULL;
-static void             *s_state_cb_data = NULL;
+static dsh_ws_json_cb_t   s_json_cb      = NULL;
+static void              *s_json_cb_data = NULL;
+static dsh_ws_binary_cb_t s_binary_cb      = NULL;  /* W3: TTS 下行 PCM */
+static void              *s_binary_cb_data = NULL;
+static dsh_ws_state_cb_t  s_state_cb      = NULL;
+static void              *s_state_cb_data = NULL;
 static bool              s_connected    = false;
 static bool              s_running      = false;
 static char             *s_uri          = NULL;
@@ -85,8 +87,10 @@ static void ws_event_handler(void *handler_args, esp_event_base_t base,
                 free(json_text);
             }
         } else if (data->op_code == WS_TRANSPORT_OPCODES_BINARY) {
-            /* BINARY 帧 — 协议层不处理，留给上层（如音频流） */
-            ESP_LOGD(TAG, "RX BINARY: %d bytes", data->data_len);
+            /* BINARY 帧 — W3: 上行可能用于 opus 音频, 下行用于 TTS PCM */
+            if (s_binary_cb && data->data_len > 0) {
+                s_binary_cb((const uint8_t *)data->data_ptr, data->data_len, s_binary_cb_data);
+            }
         }
         break;
     }
@@ -127,6 +131,12 @@ void dsh_ws_set_json_callback(dsh_ws_json_cb_t cb, void *user_data)
 {
     s_json_cb = cb;
     s_json_cb_data = user_data;
+}
+
+void dsh_ws_set_binary_callback(dsh_ws_binary_cb_t cb, void *user_data)
+{
+    s_binary_cb = cb;
+    s_binary_cb_data = user_data;
 }
 
 void dsh_ws_set_state_callback(dsh_ws_state_cb_t cb, void *user_data)

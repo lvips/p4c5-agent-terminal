@@ -32,6 +32,8 @@ dependencies:
     path: ../components/audio_pipeline/resampler_24_16
   opus_encoder:                        # W3: libopus 编码 (16kbps, 20ms 帧)
     path: ../components/audio_pipeline/opus_encoder
+  tts_player:                          # W3: TTS 下行 PCM 播放 (WS Binary → ES8311 DAC)
+    path: ../components/audio_pipeline/tts_player
   p4c5_display:
     path: ../components/p4c5_display
   p4c5_pmic:

@@ -30,6 +30,15 @@ typedef void (*dsh_ws_json_cb_t)(const char *json_text,
                                   void *user_data);
 
 /**
+ * 收到 WS Binary 帧的回调 (W3: TTS 下行 PCM 音频)
+ *
+ * @param data       二进制数据 (帧生命周期内有效, 调用方如果需要长期持有应 copy)
+ * @param len        数据长度 (字节)
+ * @param user_data  用户数据
+ */
+typedef void (*dsh_ws_binary_cb_t)(const uint8_t *data, size_t len, void *user_data);
+
+/**
  * 连接状态变化回调
  */
 typedef void (*dsh_ws_state_cb_t)(bool connected, void *user_data);
@@ -43,6 +52,11 @@ esp_err_t dsh_ws_init(const char *uri, uint32_t buffer_size);
  * 设置接收 JSON 帧的回调
  */
 void dsh_ws_set_json_callback(dsh_ws_json_cb_t cb, void *user_data);
+
+/**
+ * 设置接收 Binary 帧的回调 (W3: TTS 下行音频流)
+ */
+void dsh_ws_set_binary_callback(dsh_ws_binary_cb_t cb, void *user_data);
 
 /**
  * 设置连接状态回调

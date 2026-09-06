@@ -248,6 +248,31 @@ esp_err_t dsh_client_attach_netif(esp_netif_t *netif);
 esp_err_t dsh_client_set_status_provider(dsh_client_status_cb_t cb, void *user_data);
 
 /* ══════════════════════════════════════════════════════════
+ * Binary 帧回调 (W3: TTS 下行 PCM 音频流)
+ * ══════════════════════════════════════════════════════════ */
+
+/**
+ * Binary 帧回调签名
+ *
+ * @param data       二进制数据 (指针生命周期为回调期间, 调用方需要持久化需 copy)
+ * @param len        数据长度 (字节)
+ * @param user_data  注册时传入的用户数据
+ */
+typedef void (*dsh_client_binary_cb_t)(const uint8_t *data, size_t len, void *user_data);
+
+/**
+ * 注册 Binary 帧回调 (W3: TTS 下行 PCM)
+ *
+ * 收到的所有 WS Binary 帧都会通过此回调上报给应用层。
+ * 通常用于:
+ *   - 接收 Mac Adapter 下行的 PCM 音频 (24kHz mono Int16)
+ *   - 接收其他二进制数据
+ *
+ * 不注册则 binary 帧被静默丢弃。
+ */
+esp_err_t dsh_client_set_binary_callback(dsh_client_binary_cb_t cb, void *user_data);
+
+/* ══════════════════════════════════════════════════════════
  * 传输层切换（1 个）
  * ══════════════════════════════════════════════════════════ */
 

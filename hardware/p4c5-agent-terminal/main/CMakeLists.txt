@@ -18,6 +18,7 @@ idf_component_register(SRCS ${SOURCES}
         aec_sw                     # W3: 软件 AEC 回声消除 (NLMS)
         resampler_24_16            # W3: 24kHz→16kHz 重采样
         opus_encoder               # W3: libopus 编码 (16kbps, 20ms 帧)
+        tts_player                 # W3: TTS 下行 PCM 播放
         nvs_flash
         esp_driver_gpio
         esp_driver_i2c

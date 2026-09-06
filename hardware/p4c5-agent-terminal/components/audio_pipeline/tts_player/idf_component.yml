@@ -1,0 +1,4 @@
+description: TTS 下行 PCM 播放器 (WS Binary → ES8311 DAC, W3)
+version: "0.1.0"
+dependencies:
+  idf: ">=5.5.0"

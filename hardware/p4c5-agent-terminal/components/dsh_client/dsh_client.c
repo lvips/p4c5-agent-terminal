@@ -9,6 +9,7 @@
 
 #include "dsh_client.h"
 #include "dsh_client_transport.h"
+#include "dsh_client_ws.h"
 #include "dsh_client_frames.h"
 #include "dsh_client_heartbeat.h"
 #include "esp_log.h"
@@ -386,6 +387,14 @@ esp_err_t dsh_client_set_status_provider(dsh_client_status_cb_t cb, void *user_d
     s_status_cb = cb;
     s_status_cb_data = user_data;
     ESP_LOGI(TAG, "Status provider %s", cb ? "registered" : "cleared");
+    return ESP_OK;
+}
+
+esp_err_t dsh_client_set_binary_callback(dsh_client_binary_cb_t cb, void *user_data)
+{
+    /* 注册到 ws 层 (binary 处理在 dsh_client_ws.c) */
+    dsh_ws_set_binary_callback((dsh_ws_binary_cb_t)cb, user_data);
+    ESP_LOGI(TAG, "Binary callback %s", cb ? "registered" : "cleared");
     return ESP_OK;
 }
 

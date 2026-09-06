@@ -26,6 +26,7 @@
 #include "aec_sw.h"                /* W3: 软件 AEC 回声消除 (NLMS, P4 自实现) */
 #include "resampler_24_16.h"       /* W3: 24kHz→16kHz 重采样 (适配 p4c5_audio 24kHz) */
 #include "opus_encoder.h"          /* W3: libopus 编码 (16kbps, 20ms 帧) */
+#include "tts_player.h"            /* W3: TTS 下行 PCM 播放 (WS Binary → ES8311 DAC) */
 #include "config.h"
 #include <string.h>
 
@@ -364,6 +365,19 @@ static void handle_audio_uart_cmd(const char *line)
     } else if (strncmp(line, "audio status", 12) == 0) {
         ESP_LOGI(TAG, "🎤 [W3] audio recording = %s",
                  s_audio_recording ? "ON" : "OFF");
+    } else if (strncmp(line, "tts stats", 9) == 0) {
+        audio::tts_player_print_stats();
+    }
+}
+
+/* ── W3: WS Binary 帧回调 (TTS 下行 PCM 24kHz mono) ── */
+static void on_dsh_binary_pcm(const uint8_t *data, size_t len, void *user_data)
+{
+    (void)user_data;
+    esp_err_t err = audio::tts_player_feed_pcm(
+        reinterpret_cast<const int8_t *>(data), len);
+    if (err != ESP_OK && err != ESP_ERR_TIMEOUT) {
+        ESP_LOGW(TAG, "🔇 [W3] tts_player_feed_pcm failed: %s", esp_err_to_name(err));
     }
 }
 
@@ -486,6 +500,7 @@ extern "C" void app_main(void)
     dsh_client_register_event_callback(on_dsh_frame, NULL);
     dsh_client_register_state_callback(on_dsh_state, NULL);
     dsh_client_set_status_provider(status_provider, NULL);
+    dsh_client_set_binary_callback(on_dsh_binary_pcm, NULL);  /* W3: TTS 下行 PCM */
 
     /* 连接 DSH via WiFi */
     err = dsh_client_connect();
@@ -496,10 +511,17 @@ extern "C" void app_main(void)
     /* W3: 启动音频上行任务 (POC: 串口命令触发) */
     xTaskCreate(audio_uplink_task, "audio_uplink", 16384, NULL, 5, NULL);
 
+    /* W3: 启动 TTS 下行播放任务 */
+    err = audio::tts_player_init();
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "tts_player_init failed: %s", esp_err_to_name(err));
+    }
+
     ESP_LOGI(TAG, "=========================================");
     ESP_LOGI(TAG, "  All subsystems initialized");
     ESP_LOGI(TAG, "  v%s ready", P4C5_BOARD_VERSION);
     ESP_LOGI(TAG, "  W3 提示: 串口输入 'audio start' 开始录音上行");
+    ESP_LOGI(TAG, "  W3 提示: Mac Adapter 下行 PCM 自动播放");
     ESP_LOGI(TAG, "=========================================");
 
     /* M7 → T14: 测试图 → LVGL 真 UI */
