@@ -199,13 +199,11 @@ static void ui_update_task(void *arg)
                 snprintf(buf, sizeof(buf), "Battery: %u%%", bat);
                 lv_label_set_text(s_lbl_bat, buf);
             }
-            /* 4G */
+            /* WiFi (W1: 4G 搁置，改用 WiFi) */
             if (s_lbl_4g) {
-                int csq  = p4c5_4g_get_csq();
-                int rssi = p4c5_4g_get_rssi_dbm();
-                bool ok  = p4c5_4g_is_network_ready();
-                snprintf(buf, sizeof(buf), "4G: %ddBm (CSQ=%d) %s",
-                         rssi, csq, ok ? "[OK]" : "[..]");
+                // TODO: 从 wifi_manager 获取 RSSI
+                int rssi = -99;
+                snprintf(buf, sizeof(buf), "WiFi: %ddBm", rssi);
                 lv_label_set_text(s_lbl_4g, buf);
             }
             /* DSH */

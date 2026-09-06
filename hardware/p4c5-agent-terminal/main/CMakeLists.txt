@@ -10,9 +10,11 @@ idf_component_register(SRCS ${SOURCES}
         p4c5_pmic
         p4c5_display
         p4c5_audio
-        p4c5_4g
+        # p4c5_4g  # W1: 4G 搁置 (需电池), 改用 WiFi
+        wifi_manager
         p4c5_ui
         dsh_client
+        nvs_flash
         esp_driver_gpio
         esp_driver_i2c
         esp_driver_i2s

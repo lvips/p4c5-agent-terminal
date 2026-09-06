@@ -13,13 +13,15 @@
 #include "esp_log.h"
 #include "esp_system.h"
 #include "esp_task_wdt.h"
+#include "nvs_flash.h"
 #include "p4c5_board.h"
 #include "p4c5_pmic.h"
 #include "p4c5_display.h"
 #include "p4c5_audio.h"
-#include "p4c5_4g.h"
+// #include "p4c5_4g.h"  // W1: 4G 搁置 (需电池), 改用 WiFi
 #include "p4c5_ui.h"
 #include "dsh_client.h"
+#include "wifi_manager.h"
 #include "config.h"
 #include <string.h>
 
@@ -84,14 +86,16 @@ static void on_dsh_state(dsh_client_event_t event, void *user_data)
     }
 }
 
-/* ── DSH 状态提供者（电池 + 信号） ── */
+/* ─ DSH 状态提供者（电池 + WiFi RSSI） ── */
 static void status_provider(int *battery, int *rssi, void *user_data)
 {
     *battery = (int)p4c5_pmic_get_battery_level();
-    *rssi = p4c5_4g_get_rssi_dbm();
+    // *rssi = p4c5_4g_get_rssi_dbm();  // W1: 4G 搁置
+    *rssi = -99;  // TODO: 从 wifi_manager 获取 RSSI
 }
 
-/* ── 4G 事件回调 ── */
+/* ── 4G 事件回调 (W1: 4G 搁置，暂时注释) ── */
+/*
 static void on_4g_event(p4c5_4g_event_t event, const char *data, void *user_data)
 {
     switch (event) {
@@ -125,6 +129,7 @@ static void on_4g_event(p4c5_4g_event_t event, const char *data, void *user_data
             break;
     }
 }
+*/
 
 /* ══════════════════════════════════════════════════════════ */
 
@@ -190,47 +195,46 @@ void app_main(void)
     }
     esp_task_wdt_reset();
 
-    /* [4] 4G (ML307C) — 后台异步初始化 */
-    ESP_LOGI(TAG, "[4/5] 4G init (ML307C, baud=%d)...", P4C5_4G_BAUD_RATE);
-    p4c5_4g_set_event_callback(on_4g_event, NULL);
-    err = p4c5_4g_init();
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "4G init failed (non-fatal): %s", esp_err_to_name(err));
+    /* [4] WiFi (ESP32-C5 via SDIO) — W1: 4G 搁置，改用 WiFi */
+    ESP_LOGI(TAG, "[4/6] WiFi init (esp_hosted + wifi_manager)...");
+
+    /* NVS 初始化 (WiFi 配置持久化) */
+    esp_err_t ret = nvs_flash_init();
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        ret = nvs_flash_init();
     }
+    ESP_ERROR_CHECK(ret);
 
-    /* ── 等待模组检测（最多 10s）─────────────────────────
-     * ⚠️ 必须在循环内喂狗！系统 TWDT 超时=5s，不喂会 panic。
-     * 如果模组检测成功，使用 ML307 transport；否则回退 WiFi transport。
-     * ─────────────────────────────────────────────────────────── */
-    ESP_LOGI(TAG, "Waiting for modem detect (max 10s)...");
-    int wait_count = 0;
-    while (!p4c5_4g_is_modem_detected() && wait_count < 10) {
-        esp_task_wdt_reset();
-        vTaskDelay(pdMS_TO_TICKS(1000));
-        wait_count++;
-    }
-    bool use_ml307 = p4c5_4g_is_modem_detected();
-    ESP_LOGI(TAG, "Modem wait: %s after %ds",
-             use_ml307 ? "DETECTED" : "TIMEOUT", wait_count);
+    /* WiFi manager 初始化 */
+    ESP_ERROR_CHECK(wifi_manager_init());
 
-    /* [5] DSH Client — 必须在 init 之前设置 transport */
-    ESP_LOGI(TAG, "[5/5] DSH client init...");
+    /* 启动 WiFi (硬编码 SSID 测试) */
+    wifi_manager_config_t wifi_cfg = {
+        .sta_ssid = "YOUR_WIFI_SSID",       // TODO: 改为实际 SSID
+        .sta_password = "YOUR_WIFI_PASSWORD", // TODO: 改为实际密码
+        .ap_ssid_prefix = "p4c5-agent",
+        .ap_ssid = NULL,
+        .ap_password = NULL,
+        .ap_behavior = "fallback",
+        .ap_channel = 1,
+        .ap_max_conn = 4,
+        .max_retry = 5,
+    };
+    ESP_ERROR_CHECK(wifi_manager_start(&wifi_cfg));
 
-    /* ⚠️ set_transport 必须在 init 之前调用 */
-    if (use_ml307) {
-        const dsh_transport_t *transport = p4c5_4g_get_transport();
-        if (transport) {
-            esp_err_t terr = dsh_client_set_transport(transport);
-            if (terr == ESP_OK) {
-                ESP_LOGI(TAG, "Using ML307 4G transport");
-            } else {
-                ESP_LOGW(TAG, "set_transport failed (%s), fallback to WiFi WS",
-                         esp_err_to_name(terr));
-            }
-        }
+    /* 等待 STA 连接 (最多 30s) */
+    ESP_LOGI(TAG, "Waiting for WiFi STA connection (max 30s)...");
+    esp_err_t wifi_ret = wifi_manager_wait_connected(30000);
+    if (wifi_ret == ESP_OK) {
+        ESP_LOGI(TAG, "WiFi STA connected ✅");
     } else {
-        ESP_LOGI(TAG, "Modem not found, using default WiFi WS transport");
+        ESP_LOGW(TAG, "WiFi STA connection timeout (fallback to AP mode)");
     }
+    esp_task_wdt_reset();
+
+    /* [5] DSH Client — WiFi transport */
+    ESP_LOGI(TAG, "[5/6] DSH client init...");
 
     dsh_client_config_t dsh_cfg = {
         .url = CONFIG_P4C5_DSH_WEBSOCKET_URL,
@@ -244,20 +248,10 @@ void app_main(void)
     dsh_client_register_state_callback(on_dsh_state, NULL);
     dsh_client_set_status_provider(status_provider, NULL);
 
-    /* 连接 DSH
-     * ⚠️ 只在有可用网络时连接：
-     *   - ML307 模组检测到 → 通过 4G 连接（即使网络还没注册，transport 内部会等）
-     *   - 无 ML307 → WiFi transport 需要 esp_netif 初始化。
-     *     当前 build 未包含 WiFi netif 初始化，连接会导致 lwip assert。
-     *     待后续 WiFi 组件就绪后启用。
-     */
-    if (use_ml307) {
-        err = dsh_client_connect();
-        if (err != ESP_OK) {
-            ESP_LOGW(TAG, "DSH connect via 4G failed (will retry): %s", esp_err_to_name(err));
-        }
-    } else {
-        ESP_LOGW(TAG, "No network available (4G=❌, WiFi netif=not init). DSH connect deferred.");
+    /* 连接 DSH via WiFi */
+    err = dsh_client_connect();
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "DSH connect via WiFi failed (will retry): %s", esp_err_to_name(err));
     }
 
     ESP_LOGI(TAG, "=========================================");
@@ -276,11 +270,8 @@ void app_main(void)
         esp_task_wdt_reset();
         vTaskDelay(pdMS_TO_TICKS(10000));
 
-        ESP_LOGI(TAG, "💓 bat=%u%% csq=%d rssi=%ddBm dsh=%s 4g=%s",
+        ESP_LOGI(TAG, "💓 bat=%u%% dsh=%s wifi=connected",
                  p4c5_pmic_get_battery_level(),
-                 p4c5_4g_get_csq(),
-                 p4c5_4g_get_rssi_dbm(),
-                 dsh_client_is_connected() ? "✅" : "❌",
-                 p4c5_4g_is_network_ready() ? "✅" : "⏳");
+                 dsh_client_is_connected() ? "✅" : "❌");
     }
 }
