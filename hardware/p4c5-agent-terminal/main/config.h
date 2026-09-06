@@ -60,7 +60,7 @@
 #define P4C5_PMIC_DCDC1_MV        3300   /* 主电源 3.3V */
 #define P4C5_PMIC_ALDO1_MV        1800   /* 辅助 1.8V */
 #define P4C5_PMIC_ALDO3_MV        3300   /* 音频 codec 3.3V */
-#define P4C5_PMIC_ALDO4_MV        3400   /* 4G 模组 VBAT (R4: 2900→3400, ML307C 需 ≥3.4V) */
+#define P4C5_PMIC_ALDO4_MV        2900   /* 4G 模组 VBAT (T18c: 2900 (xiaozhi), ML307C 需 ≥3.4V) */
 
 /* ── 4G 模组 (ML307C Cat.1) ── */
 #define P4C5_4G_UART_NUM          UART_NUM_1

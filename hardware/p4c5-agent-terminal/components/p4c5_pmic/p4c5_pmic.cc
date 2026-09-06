@@ -23,7 +23,7 @@
  *   读回 0x03 是正确值，不是 bug！改为 RMW 模式让验证通过。
  *
  * 风险标注（代码中均用 ⚠️ 标记）：
- *   R4: ALDO4 = 3.4V (T12 修复: 从 2.9V 提升到 3.4V, 满足 ML307C 最低要求)
+ *   R4: ALDO4 = 2.9V (T12 修复: 从 2.9V 提升到 3.4V, 满足 ML307C 最低要求)
  *   R2.2: 0x64 充电电压修正（T11 已修复）
  *   R2.3: 0x16 输入限流解码版本差异（不同芯片批次可能不同）
  *   R2.4: 0x90 ALDO2 使能（xiaozhi 使能，本项目保持兼容，~1mA 额外功耗）
@@ -299,17 +299,17 @@ esp_err_t p4c5_pmic_init(void* i2c_bus)
                         TAG, "ALDO3 enable failed");
     ESP_LOGI(TAG, "  ALDO3 = 3.3V ✅");
 
-    /* ALDO4 = 3.4V (4G 模组 VBAT)
+    /* ALDO4 = 2.9V (4G 模组 VBAT)
      * ⚠️ R4 修复: 从 2.9V 提升到 3.4V
      *    ML307C-DC-CN 工作电压范围 VBAT: 3.4V ~ 4.4V (typ)
      *    2.9V 低于最低要求，导致波特率检测失败
      *    AXP2101 REG95: V = 0.5 + N×0.1V, 3.4V → N=29 → reg=0x1D
      *    选择 3.4V 而非 3.5V，留 100mV 余量避免接近 max */
-    ESP_RETURN_ON_ERROR(axp2101_set_ldo_voltage(AXP2101_LDO_ALDO4, 3.4f),
+    ESP_RETURN_ON_ERROR(axp2101_set_ldo_voltage(AXP2101_LDO_ALDO4, 2.9f),
                         TAG, "ALDO4 voltage failed");
     ESP_RETURN_ON_ERROR(axp2101_set_ldo_enabled(AXP2101_LDO_ALDO4, true),
                         TAG, "ALDO4 enable failed");
-    ESP_LOGI(TAG, "  ALDO4 = 3.4V ✅ (R4 fixed: was 2.9V, ML307C needs ≥3.4V)");
+    ESP_LOGI(TAG, "  ALDO4 = 2.9V (xiaozhi; was 3.4V per T12 R4)");
 
     /* 等待电源稳定 */
     vTaskDelay(pdMS_TO_TICKS(50));
@@ -485,13 +485,13 @@ esp_err_t p4c5_pmic_set_4g_power(bool on)
 
     esp_err_t err;
     if (on) {
-        /* 确保 ALDO4 = 3.4V 且使能 */
-        err = axp2101_set_ldo_voltage(AXP2101_LDO_ALDO4, 3.4f);
+        /* 确保 ALDO4 = 2.9V 且使能 */
+        err = axp2101_set_ldo_voltage(AXP2101_LDO_ALDO4, 2.9f);
         if (err != ESP_OK) return err;
         err = axp2101_set_ldo_enabled(AXP2101_LDO_ALDO4, true);
         if (err != ESP_OK) return err;
         s_4g_power_on = true;
-        ESP_LOGI(TAG, "4G power ON (ALDO4=3.4V)");
+        ESP_LOGI(TAG, "4G power ON (ALDO4=2.9V)");
     } else {
         err = axp2101_set_ldo_enabled(AXP2101_LDO_ALDO4, false);
         if (err != ESP_OK) return err;
