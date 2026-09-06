@@ -206,30 +206,26 @@ void app_main(void)
     }
     ESP_ERROR_CHECK(ret);
 
-    /* W1 hotfix: 临时禁用 WiFi (esp_wifi_init 0x3001 panic 导致黑白闪屏)
-       等 wifi_manager 完整修复后再启用 */
-    ESP_LOGW(TAG, "⚠️ W1 hotfix: WiFi 临时禁用 (esp_wifi_init 0x3001 panic)");
+    /* W1-stable: SDIO transport 已 link, 启用 WiFi */
+    ESP_LOGI(TAG, "[4/6] WiFi init (esp_hosted SDIO via ESP32-C5)...");
 
-#if 0  /* W1 disabled — 等待 WiFi 链路完整修复 */
     /* WiFi manager 初始化 */
     ESP_ERROR_CHECK(wifi_manager_init());
 
     /* 启动 WiFi (硬编码 SSID 测试) */
     wifi_manager_config_t wifi_cfg = {
-        .sta_ssid = "ZTE-SONG-2.4G",              // 2.4GHz (C5 兼容性更好)
-        .sta_password = "51UPSONG99",          // 用户家 WiFi 密码
+        .sta_ssid = "ZTE-SONG-2.4G",
+        .sta_password = "51UPSONG99",
         .ap_ssid_prefix = "p4c5-agent",
         .ap_ssid = NULL,
         .ap_password = NULL,
-        .ap_behavior = "keep",  // W1 fix: "fallback" 无效, 有效值: "" / "keep" / "close_on_sta"
+        .ap_behavior = "keep",
         .ap_channel = 1,
         .ap_max_conn = 4,
         .max_retry = 5,
     };
     ESP_ERROR_CHECK(wifi_manager_start(&wifi_cfg));
-#endif  /* W1 disabled */
 
-#if 0  /* W1 disabled: wait_connected 一起禁用 */
     /* 等待 STA 连接 (最多 20s — 必须 < TWDT 30s timeout) */
     ESP_LOGI(TAG, "Waiting for WiFi STA connection (max 20s)...");
     esp_err_t wifi_ret = wifi_manager_wait_connected(20000);
@@ -239,11 +235,9 @@ void app_main(void)
         ESP_LOGW(TAG, "WiFi STA connection timeout (fallback to AP mode)");
     }
     esp_task_wdt_reset();  /* TWDT reset (WiFi wait 不能超过 TWDT) */
-#endif  /* W1 disabled */
 
     /* [5] DSH Client — WiFi transport */
-    ESP_LOGI(TAG, "[5/6] DSH client init (skipped - no WiFi, avoid lwIP assert)...");
-#if 0  /* W1 disabled: DSH 依赖 WiFi, 避免 lwIP tcpip_send_msg_wait_sem panic */
+    ESP_LOGI(TAG, "[5/6] DSH client init...");
     dsh_client_config_t dsh_cfg = {
         .url = CONFIG_P4C5_DSH_WEBSOCKET_URL,
         .device_id = CONFIG_P4C5_DSH_DEVICE_ID,
@@ -261,7 +255,6 @@ void app_main(void)
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "DSH connect via WiFi failed (will retry): %s", esp_err_to_name(err));
     }
-#endif  /* W1 disabled */
 
     ESP_LOGI(TAG, "=========================================");
     ESP_LOGI(TAG, "  All subsystems initialized");
@@ -279,10 +272,13 @@ void app_main(void)
         esp_task_wdt_reset();
         vTaskDelay(pdMS_TO_TICKS(10000));
 
-        /* W1 fix: 暂时只显示 bat, wifi/dsh 禁用避免触发 lwIP/WiFi init panic */
-        ESP_LOGI(TAG, "💓 bat=%u%% (WiFi/DSH 临时禁用)",
-                 p4c5_pmic_get_battery_level());
-#if 0  /* W1 disabled: heartbeat 触发 WiFi init panic */
+        /* W1-stable: heartbeat 显示 bat + WiFi 状态 */
+        wifi_manager_status_t wifi_st = {0};
+        wifi_manager_get_status(&wifi_st);
+        ESP_LOGI(TAG, "💓 bat=%u%% wifi=%s ip=%s", p4c5_pmic_get_battery_level(),
+                 wifi_st.sta_connected ? "✅ connected" : "❌ disconnected",
+                 wifi_st.sta_ip ? wifi_st.sta_ip : "0.0.0.0");
+#if 0  /* W1 disabled: dsh_client_is_connected 触发 lwIP */
         wifi_manager_status_t wifi_st = {0};
         wifi_manager_get_status(&wifi_st);
         ESP_LOGI(TAG, "💓 bat=%u%% dsh=%s wifi=%s (IP=%s mode=%s)",
