@@ -26,6 +26,7 @@
 | 引脚怎么接 | `hw/p4c5-pins.csv` |
 | 跟 OMT Tab5 差在哪 | `hw/00-新硬件差异矩阵.md` |
 | IC 规格书在哪 | `hw/datasheets/`（15 份 PDF）|
+| **IC 规格速查** | **`hw/datasheets-summary/README.md`** → pmic-axp2101.md / ml307c.md / peripherals.md / AXP2101-REG-MAP.md |
 | CC 怎么用 | `cc-orchestration/README.md` |
 | 当前进度到哪 | `handovers/HANDOFF.md` |
 | 历史踩坑 | `cc-orchestration/CHANGELOG.md` |
