@@ -25,6 +25,7 @@
 | 这个开发板是什么 | `hw/README.md` → `hw/p4c5-spec.md` |
 | 引脚怎么接 | `hw/p4c5-pins.csv` |
 | 跟 OMT Tab5 差在哪 | `hw/00-新硬件差异矩阵.md` |
+| **xiaozhi vs p4c5 电源对比** | **`hw/xiaozhi-power-comparison.md`** |
 | IC 规格书在哪 | `hw/datasheets/`（15 份 PDF）|
 | **IC 规格速查** | **`hw/datasheets-summary/README.md`** → pmic-axp2101.md / ml307c.md / peripherals.md / AXP2101-REG-MAP.md |
 | CC 怎么用 | `cc-orchestration/README.md` |

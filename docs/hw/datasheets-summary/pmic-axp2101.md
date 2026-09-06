@@ -137,4 +137,76 @@
 
 ---
 
-**下次更新**：0x14/0x16 注释修正后
+## 6. xiaozhi 参考配置（DSH 调研 2026-09-06）
+
+xiaozhi `kevin-p4c5-4g` 板子使用 AXP2101 的完整寄存器配置。
+来源：`/tmp/p4c5_xiaozhi/main/boards/kevin-p4c5-4g/kevin_p4c5_4g_board.cc` L41-119。
+
+### 6.1 Pmic 构造函数（13 寄存器）
+
+```c
+// kevin_p4c5_4g_board.cc L41-61
+WriteReg(0x22, 0b110);    // PWROFF_EN
+WriteReg(0x27, 0x10);     // IRQ/OFF/ON level
+WriteReg(0x93, 0x1C);     // ALDO2 = 3.3V
+value = ReadReg(0x90) | 0x02; WriteReg(0x90, value);  // ALDO2 enable (RMW)
+WriteReg(0x64, 0x03);     // Charge voltage = 4.2V
+WriteReg(0x61, 0x05);     // Precharge = 125mA
+WriteReg(0x62, 0x0A);     // Constant charge = 400mA
+WriteReg(0x63, 0x15);     // Termination current
+WriteReg(0x14, 0x00);     // Min Vsys DPM = 4.1V
+WriteReg(0x15, 0x00);     // Input voltage limit = 3.88V
+WriteReg(0x16, 0x05);     // Input current limit = 2000mA
+WriteReg(0x24, 0x01);     // PWROFF VSYS threshold = 2.7V
+WriteReg(0x50, 0x14);     // TS pin ctrl
+```
+
+### 6.2 电压轨配置
+
+```c
+// kevin_p4c5_4g_board.cc L99-119
+axp2101_set_dcdc_voltage(KSDIY_PMIC_DCDC1, 3.3f);   // 主电源
+axp2101_set_ldo_voltage(KSDIY_PMIC_LDO_ALDO1, 1.8f); // 辅助
+axp2101_set_ldo_voltage(KSDIY_PMIC_LDO_ALDO3, 3.3f); // 音频
+axp2101_set_ldo_voltage(KSDIY_PMIC_LDO_ALDO4, 2.9f); // 4G VBAT ← 关键差异
+vTaskDelay(pdMS_TO_TICKS(50));
+```
+
+### 6.3 寄存器逐项对照
+
+| 地址 | 名称 | xiaozhi 值 | p4c5 值 | 章节 | 页码 | 状态 |
+|---|---|---|---|---|---|---|
+| 0x22 | PWROFF_EN | 0x06 | 0x06 | §6.13.2.19 | p.36 | ✅ 一致 |
+| 0x27 | IRQ/OFF/ON | 0x10 | 0x10 | §6.13.2.24 | p.38 | ✅ 一致 |
+| 0x93 | ALDO2 voltage | 0x1C (3.3V) | 0x1C | §6.13.2.78 | p.54 | ✅ 一致 |
+| 0x90 | LDO enable | RMW 0x02 | RMW 0x02 | §6.13.2.75 | p.53 | ✅ 一致 |
+| 0x64 | Charge voltage | 0x03 (4.2V) | 0x03 | §6.13.2.62 | p.48 | ✅ 一致 |
+| 0x61 | Precharge | 0x05 (125mA) | 0x05 | §6.13.2.59 | p.47 | ✅ 一致 |
+| 0x62 | Constant charge | 0x0A (400mA) | 0x0A | §6.13.2.60 | p.48 | ✅ 一致 |
+| 0x63 | Termination | 0x15 | 0x15 | §6.13.2.61 | p.48 | ✅ 一致 |
+| 0x14 | Min Vsys DPM | 0x00 (4.1V) | 0x00 | §6.13.2.10 | p.33 | ✅ 一致 |
+| 0x15 | Input V limit | 0x00 (3.88V) | 0x00 | §6.13.2.11 | p.33 | ✅ 一致 |
+| 0x16 | Input I limit | 0x05 (2000mA) | 0x05 | §6.13.2.12 | p.34 | ✅ 一致 |
+| 0x24 | PWROFF VSYS | 0x01 (2.7V) | 0x01 | §6.13.2.21 | p.37 | ✅ 一致 |
+| 0x50 | TS pin ctrl | 0x14 | 0x14 | §6.13.2.46 | p.45 | ✅ 一致 |
+
+### 6.4 关键差异
+
+| 差异 | xiaozhi | p4c5 | 说明 |
+|---|---|---|---|
+| **ALDO4 电压** | **2.9V** (0x18) | **3.4V** (0x1D) |  p4c5 T12 基于 ML307C 规格书修复 |
+| 寄存器验证 | 无 | 读回验证 | p4c5 增强 |
+| 运行时电源控制 | 无 | `p4c5_pmic_set_4g_power()` | p4c5 增强 |
+| DTR 引脚 | 无 | GPIO51 | p4c5 增强（低功耗）|
+
+### 6.5 风险标注
+
+| 风险 | 说明 | 优先级 |
+|---|---|---|
+| ALDO4 2.9V vs 3.4V | xiaozhi 验证 2.9V 可用，ML307C 规格书要求 ≥3.4V | **P1** — M12 实测 |
+| Display 重复写 ALDO4 | ksdiy_lvgl_port.c 也写 ALDO4，需两处同步 | P1 |
+| 0x14/0x16 注释 | 代码注释与规格书不一致，功能正常 | P3 |
+
+---
+
+**下次更新**：0x14/0x16 注释修正 + M12 ALDO4 实测后

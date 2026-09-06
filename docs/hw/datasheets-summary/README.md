@@ -92,7 +92,7 @@ Sources:
 
 | 文件 | 模块 | 关键数据 | 最后更新 |
 |---|---|---|---|
-| pmic-axp2101.md | AXP2101 PMIC | 13 寄存器 init table + 页码 | T13 (v2.0) |
+| pmic-axp2101.md | AXP2101 PMIC | 13 寄存器 + xiaozhi 对照 | T14 (v2.1) |
 | ml307c.md | ML307C 4G | VBAT 3.4-4.5V, ALDO4 适配 | T13 (v2.0) |
 | peripherals.md | 外设汇总 | ST7123(0x55), LSM6DS3(0x6A), MCP4725(0x60) | T13 (v2.0) |
 | AXP2101-REG-MAP.md | AXP2101 寄存器速查 | 全 0x00-0xA4 寄存器 + 页码 | T13 (v1.0) |
@@ -111,7 +111,7 @@ Sources:
 | 引脚定义 | `docs/hw/p4c5-pins.csv` | 引脚映射 |
 | AXP2101 0x64 调查 | `docs/hw/axp2101-0x64-bug-investigation.md` | T11 详细分析 |
 | ALDO4 调查 | `docs/hw/axp2101-aldo4-investigation.md` | T12 详细分析 |
-| M10 验证报告 | `docs/hw/M10-e2e-verification-report.md` | 实测日志 |
+| **xiaozhi vs p4c5 对比** | **`docs/hw/xiaozhi-power-comparison.md`** | **T14 完整对比** |
 | PMIC 审计 | `docs/hw/pmic-registers-audit.md` | T3 原始审计 |
 
 ---
