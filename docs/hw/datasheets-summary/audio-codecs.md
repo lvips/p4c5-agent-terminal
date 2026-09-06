@@ -65,14 +65,28 @@
 | **工作电压** | 3.3V（共用 ALDO3）|
 | **关键特性** | 内置麦克风前置放大器 + AEC 回声消除参考输入 |
 
-⚠️ **规格书未在 docs/hw/datasheets/** — 需要补：
+### 重要发现：ES7210 驱动来源
 
-**补拷路径**（任选一）：
-1. 从 xiaozhi 解压后的 `components/` 目录找
-2. 从 Espressif 官网下载：`es7210_datasheet.pdf`
-3. 从 OMT 仓库拷贝（OMT 也用 ES7210）
+**ES7210 驱动由 ESP-IDF `esp_audio_codec` 库提供**，无需写裸寄存器驱动。
 
-### I2C 初始化序列（参考 OMT，已稳定）
+xiaozhi 的 `box_audio_codec.cc` 用 `es7210_codec_new()` 封装，**只需要配置 I2C 地址 + 通道选择**，Espressif 提供所有寄存器操作。
+
+**M1 实现路径**：
+```c
+#include "es7210_codec.h"  // 来自 esp_audio_codec 组件
+
+es7210_codec_cfg_t cfg = {
+    .ctrl_if = i2c_ctrl_if,
+    .mic_selected = ES7210_SEL_MIC1 | ES7210_SEL_MIC2 | 
+                    ES7210_SEL_MIC3 | ES7210_SEL_MIC4,
+};
+es7210_codec_if_t *es7210 = es7210_codec_new(&cfg);
+```
+
+**风险解除**（v0.1.0 → v0.1.1）：
+- ~~R3.1: ES7210 规格书缺失~~ → ✅ 改用 Espressif 封装
+- 不需要补充 ES7210 规格书 PDF
+- 不需要写 I2C 初始化序列（库自动处理）
 
 ```
 1. 写 0x00 = 0xFF  // 软复位
@@ -89,7 +103,7 @@
 
 ### 通道选择
 
-| 寄存器 | 值 | 说明 |
+| 配置项 | 值 | 说明 |
 |---|---|---|
 | `es7210_cfg.mic_selected` | `ES7210_SEL_MIC1 \| ES7210_SEL_MIC2 \| ES7210_SEL_MIC3 \| ES7210_SEL_MIC4` | 4 麦全开 |
 | AEC 参考 | `input_reference = true` | 启用 ES8311 DAC 输出作为 AEC 参考（回声消除）|
@@ -181,7 +195,7 @@
 
 | ID | 风险 | 概率 | 影响 | 缓解 |
 |---|---|---|---|---|
-| R3.1 | **ES7210 规格书缺失** | 100% | 中 | 立即从 xiaozhi `components/` 找或 Espressif 官网下载 |
+| ~~R3.1~~ | ~~ES7210 规格书缺失~~ | 0% | - | ✅ **已解决**：用 Espressif `esp_audio_codec` 库封装，**无需裸寄存器驱动** |
 | R3.2 | MEMS 麦克风型号（敏芯微）社区资料少 | 100% | 低 | 走 xiaozhi 封装，无需自己写 driver |
 | R3.3 | PA 静态电流未实测 | 100% | 低 | M1 阶段测 |
 | R3.4 | 4 麦间距（用于波束成形）未定义 | 100% | 中 | M3 阶段音频算法决定 |
@@ -192,7 +206,9 @@
 
 ## 8. M1 启动检查清单
 
-- [ ] 立即补 ES7210 规格书
+- [x] ~~补 ES7210 规格书~~ → **用 Espressif `esp_audio_codec` 库即可**
+- [ ] 在 `idf_component.yml` 添加 `espressif/esp_audio_codec` 依赖
+- [ ] 移植 xiaozhi 的 `box_audio_codec.cc` 到本项目 components
 - [ ] 实测 4 麦录音（播放 1kHz 测试音，观察波形）
 - [ ] 实测扬声器输出（PA_EN 拉高后听音）
 - [ ] 24h 长稳测试（持续录音 + 播放）
