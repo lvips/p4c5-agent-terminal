@@ -1,5 +1,6 @@
 # p4c5-agent-terminal sdkconfig defaults
 # 生成于 M4 阶段 — 最小可编译骨架
+# T17: 加 PSRAM + L2 cache + LVGL 优化 — 解决 MIPI DSI underrun
 
 # ── 目标芯片 ──
 CONFIG_IDF_TARGET="esp32p4"
@@ -13,9 +14,22 @@ CONFIG_PARTITION_TABLE_FILENAME="partitions.csv"
 CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
 CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
 
-# ── PSRAM (Octal, 默认 P4 配置) ──
+# ── PSRAM (Hex 16-line, 200MHz — 关键! T17 提速) ──
+# 之前默认 20MHz 导致 DSI underrun (DSI 需 46 MB/s，20MHz 只给 40 MB/s)
+# 200MHz → 理论 400 MB/s (16-bit 总线), 实际 ~300 MB/s, 富余 6x
 CONFIG_ESP_PSRAM=y
 CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_HEX=y
+CONFIG_SPIRAM_SPEED_200M=y
+
+# ── L2 Cache (T17: 加大 cache 缓存 framebuffer，提升 DSI 有效带宽) ──
+# 默认 128KB → 256KB；默认 64B line → 128B line
+# 256KB cache 可以缓存更多 framebuffer 行，DSI 重读同一行时命中 cache
+CONFIG_CACHE_L2_CACHE_256KB=y
+CONFIG_CACHE_L2_CACHE_LINE_128B=y
+
+# ── 编译器优化（性能优先）──
+CONFIG_COMPILER_OPTIMIZATION_PERF=y
 
 # ── WiFi (暂时禁用，M5 只需验证启动）──
 # CONFIG_ESP_HOSTED_ENABLED=y
@@ -50,7 +64,7 @@ CONFIG_P4C5_DSH_WEBSOCKET_URL="ws://dsh.example.com/ws"
 CONFIG_P4C5_DSH_DEVICE_ID="p4c5-001"
 CONFIG_P4C5_DSH_AUTH_TOKEN=""
 
-# ── LVGL (T14) ──
+# ── LVGL (T14 + T17 优化) ──
 # 颜色深度 16 = RGB565（与 ST7102 RGB565 匹配）
 CONFIG_LV_CONF_SKIP=y
 CONFIG_LV_COLOR_DEPTH=16
@@ -60,9 +74,22 @@ CONFIG_LV_MEM_SIZE="(256*1024)"
 # LV_DRAW_SW：启用 RGB565 软渲染
 CONFIG_LV_USE_DRAW_SW=y
 CONFIG_LV_DRAW_SW_SUPPORT_RGB565=y
-# DPI 刷新周期 ~33ms = 30fps
-CONFIG_LV_DEF_REFR_PERIOD=33
+# T17: 刷新周期 33ms (30fps) → 100ms (10fps) — 降低 PSRAM 写带宽
+CONFIG_LV_DEF_REFR_PERIOD=100
+# T17: FreeRTOS OS 集成 — 正确的 mutex/信号量实现
+CONFIG_LV_OS_FREERTOS=y
+# T17: 双核并行渲染 (ESP32-P4 是 RISC-V 双核)
+CONFIG_LV_DRAW_SW_DRAW_UNIT_CNT=2
+# T17: 用 CLIB 替代 LVGL 内置 — 减少代码段，提升性能
+CONFIG_LV_USE_CLIB_MALLOC=y
+CONFIG_LV_USE_CLIB_STRING=y
+CONFIG_LV_USE_CLIB_SPRINTF=y
+# T17: 样式缓存 — 减少样式查询开销
+CONFIG_LV_OBJ_STYLE_CACHE=y
 # 字体：默认 14，额外启用 24 供按钮使用
 CONFIG_LV_FONT_DEFAULT_MONTSERRAT_14=y
 CONFIG_LV_FONT_MONTSERRAT_24=y
 
+# ── 注：SPIRAM_XIP_FROM_PSRAM 故意不启用 ──
+# XIP 把固件代码搬到 PSRAM 执行，反而增加 PSRAM 总线负载
+# 在 DSI 已经接近 PSRAM 带宽上限的场景下会恶化 underrun
