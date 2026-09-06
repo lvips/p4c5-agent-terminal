@@ -19,6 +19,7 @@ idf_component_register(SRCS ${SOURCES}
         resampler_24_16            # W3: 24kHz→16kHz 重采样
         opus_encoder               # W3: libopus 编码 (16kbps, 20ms 帧)
         tts_player                 # W3: TTS 下行 PCM 播放
+        wake_word_detector         # W4: P4 自实现 RMS 唤醒检测
         nvs_flash
         esp_driver_gpio
         esp_driver_i2c

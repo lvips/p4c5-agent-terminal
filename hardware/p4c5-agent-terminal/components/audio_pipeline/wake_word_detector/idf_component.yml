@@ -1,0 +1,4 @@
+description: Wake Word Detector (P4 自实现 RMS-based, W4 POC)
+version: "0.1.0"
+dependencies:
+  idf: ">=5.5.0"

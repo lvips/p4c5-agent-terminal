@@ -27,6 +27,7 @@
 #include "resampler_24_16.h"       /* W3: 24kHz→16kHz 重采样 (适配 p4c5_audio 24kHz) */
 #include "opus_encoder.h"          /* W3: libopus 编码 (16kbps, 20ms 帧) */
 #include "tts_player.h"            /* W3: TTS 下行 PCM 播放 (WS Binary → ES8311 DAC) */
+#include "wake_word_detector.h"    /* W4: P4 自实现 RMS-based 唤醒检测 */
 #include "config.h"
 #include <string.h>
 
@@ -37,6 +38,9 @@ static char w2_last_tool_id[64] = {0};
 
 /* W3: 录音门控 (POC: 串口命令触发, 类似 OMT `s_app_recording`) */
 static volatile bool s_audio_recording = false;
+
+/* W4: 唤醒检测使能 (POC: 串口命令 wake enable/disable) */
+static volatile bool s_wake_enabled = false;
 
 /* ── DSH 帧回调 (W2: 处理全部 14 类下行帧) ── */
 static void on_dsh_frame(const char *frame_type, cJSON *json, void *user_data)
@@ -265,19 +269,35 @@ static void audio_uplink_task(void *arg)
     audio::OpusEncoderConfig opus_cfg = audio::opus_encoder_default_config();
     ESP_ERROR_CHECK(audio::opus_encoder_init(opus_cfg));
 
-    ESP_LOGI("audio_uplink", "W3 音频上行链路启动");
+    /* W4: 唤醒检测初始化 */
+    audio::WakeDetectorConfig wake_cfg;
+    wake_cfg.sample_rate         = 24000;
+    wake_cfg.wake_rms_threshold  = 1500;  /* 唤醒 RMS 阈值 */
+    wake_cfg.sleep_rms_threshold = 500;   /* 睡眠 RMS 阈值 */
+    wake_cfg.wake_hold_frames    = 5;     /* 100ms 持续唤醒 */
+    wake_cfg.sleep_hold_frames   = 100;   /* 2s 持续静音后睡眠 */
+    ESP_ERROR_CHECK(audio::wake_word_detector_init(wake_cfg));
+
+    ESP_LOGI("audio_uplink", "W3+W4 音频上行链路启动");
     ESP_LOGI("audio_uplink", "  4ch@24kHz (ch0+ch2=mic, ch1=AEC_ref, ch3=unused)");
     ESP_LOGI("audio_uplink", "  → 软件 AEC (NLMS, taps=%u, mu=%.4f)",
              aec_cfg.filter_taps, aec_cfg.step_size);
     ESP_LOGI("audio_uplink", "  → 24k→16k 重采样 → opus → WS Binary 上行");
-    ESP_LOGI("audio_uplink", "触发方式: 串口命令 'audio start' / 'audio stop'");
+    ESP_LOGI("audio_uplink", "触发方式:");
+    ESP_LOGI("audio_uplink", "  - 串口 'audio start/stop' (手动)");
+    ESP_LOGI("audio_uplink", "  - 串口 'wake enable' (W4: RMS-based 自动唤醒)");
 
-    uint64_t frame_count = 0;
-    uint64_t sent_count  = 0;
+    uint64_t frame_count  = 0;
+    uint64_t sent_count   = 0;
+    bool     is_uploading = false;  /* 当前是否在上行 (RECORDING 状态) */
 
     for (;;) {
-        /* 录音门控 */
-        if (!s_audio_recording) {
+        /* 总门控: 必须 audio_recording 或 wake_enabled 任一开启 */
+        if (!s_audio_recording && !s_wake_enabled) {
+            if (is_uploading) {
+                ESP_LOGI("audio_uplink", "🛑 停止上行 (门控关闭)");
+                is_uploading = false;
+            }
             vTaskDelay(pdMS_TO_TICKS(20));
             continue;
         }
@@ -321,6 +341,30 @@ static void audio_uplink_task(void *arg)
             continue;
         }
 
+        /* W4: 唤醒检测 - 仅在 wake_enabled 且非手动 audio_recording 时检测
+         *    手动 audio_recording 跳过 wake (强制上行)
+         */
+        if (s_wake_enabled && !s_audio_recording) {
+            audio::WakeEvent evt = audio::wake_word_detector_feed(
+                s_aec_out, FRAME_SAMPLES_24K);
+            if (evt == audio::WakeEvent::WAKE && !is_uploading) {
+                is_uploading = true;
+                ESP_LOGI("audio_uplink", "🌟 唤醒! 开始上行 (W4 auto)");
+            } else if (evt == audio::WakeEvent::SLEEP && is_uploading) {
+                is_uploading = false;
+                ESP_LOGI("audio_uplink", "💤 睡眠, 停止上行 (W4 auto)");
+            }
+        } else {
+            /* 手动模式: 总是上行 */
+            is_uploading = s_audio_recording;
+        }
+
+        /* 不上行时, 只录音不上行 (节省带宽 + 等待唤醒) */
+        if (!is_uploading) {
+            frame_count++;
+            continue;
+        }
+
         /* 4. 24kHz → 16kHz 重采样 (480 → 320 samples) */
         size_t out_len = 0;
         ret = audio::resampler_24_16_process(s_aec_out, s_mono16k, &out_len);
@@ -343,9 +387,10 @@ static void audio_uplink_task(void *arg)
         if (send_ret == ESP_OK) {
             sent_count++;
             if ((sent_count % 250) == 0) {
-                ESP_LOGI("audio_uplink", "已发送 %llu 帧 (opus %u bytes/帧, AEC=%s)",
+                ESP_LOGI("audio_uplink", "已发送 %llu 帧 (opus %u bytes/帧, AEC=%s, wake=%s)",
                          (unsigned long long)sent_count, (unsigned)opus_len,
-                         aec_cfg.enable_aec ? "ON" : "OFF");
+                         aec_cfg.enable_aec ? "ON" : "OFF",
+                         s_wake_enabled ? "AUTO" : "MAN");
             }
         }
 
@@ -383,7 +428,7 @@ static void audio_uplink_task(void *arg)
     }
 }
 
-/* ── 串口命令处理 (POC: 解析 audio start/stop) ── */
+/* ── 串口命令处理 (POC: 解析 audio start/stop + wake enable) ── */
 static void handle_audio_uart_cmd(const char *line)
 {
     if (strncmp(line, "audio start", 11) == 0) {
@@ -393,10 +438,23 @@ static void handle_audio_uart_cmd(const char *line)
         s_audio_recording = false;
         ESP_LOGI(TAG, "🔇 [W3] audio recording OFF (上行链路暂停)");
     } else if (strncmp(line, "audio status", 12) == 0) {
-        ESP_LOGI(TAG, "🎤 [W3] audio recording = %s",
-                 s_audio_recording ? "ON" : "OFF");
+        ESP_LOGI(TAG, "🎤 [W3] audio recording = %s, wake = %s",
+                 s_audio_recording ? "ON" : "OFF",
+                 s_wake_enabled ? "ENABLED" : "DISABLED");
     } else if (strncmp(line, "tts stats", 9) == 0) {
         audio::tts_player_print_stats();
+    } else if (strncmp(line, "wake enable", 11) == 0) {
+        s_wake_enabled = true;
+        s_audio_recording = false;  /* wake 模式自动控制 */
+        ESP_LOGI(TAG, "🌟 [W4] wake detection ENABLED (喊一声激活, 静音 2s 自动停止)");
+    } else if (strncmp(line, "wake disable", 12) == 0) {
+        s_wake_enabled = false;
+        ESP_LOGI(TAG, "💤 [W4] wake detection DISABLED");
+    } else if (strncmp(line, "wake status", 11) == 0) {
+        ESP_LOGI(TAG, "🌟 [W4] wake = %s, audio_recording = %s",
+                 s_wake_enabled ? "ENABLED" : "DISABLED",
+                 s_audio_recording ? "ON" : "OFF");
+        audio::wake_word_detector_print_stats();
     }
 }
 
