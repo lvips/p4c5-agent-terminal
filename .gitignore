@@ -52,3 +52,5 @@ package-lock.json
 ._*
 .Spotlight-V100
 .Trashes
+# CC 创建的工作树 (CC working trees, not source)
+.claude/
