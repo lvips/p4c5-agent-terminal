@@ -59,6 +59,12 @@ void p4c5_display_deinit(void);
  */
 void* p4c5_display_get_panel(void);
 
+/**
+ * @brief 获取 ST7123 触摸 handle
+ * @return touch handle，未初始化或失败返回 NULL
+ */
+void* p4c5_display_get_touch(void);
+
 #ifdef __cplusplus
 }
 #endif
