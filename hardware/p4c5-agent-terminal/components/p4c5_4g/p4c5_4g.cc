@@ -55,7 +55,7 @@ static void notify_event(p4c5_4g_event_t event, const char *data = nullptr)
     }
 }
 
-/* ── 内部：硬件初始化 ── */
+/* ── 内部：硬件初始化 ─ */
 static esp_err_t power_on(void)
 {
     gpio_config_t cfg = {
@@ -66,11 +66,22 @@ static esp_err_t power_on(void)
         .intr_type = GPIO_INTR_DISABLE,
     };
     ESP_RETURN_ON_ERROR(gpio_config(&cfg), TAG, "PWR gpio_config failed");
-    gpio_set_level(P4C5_4G_PWR_GPIO, 1);
-    ESP_LOGI(TAG, "ML307C power ON (GPIO%d)", P4C5_4G_PWR_GPIO);
 
-    /* ML307C 冷启动约 3-5s */
-    vTaskDelay(pdMS_TO_TICKS(3000));
+    /* ML307C PWRKEY 时序（规格书 p.5 / datasheets-summary/ml307c.md §4）：
+     * 1. 初始拉高
+     * 2. 拉低 ≥100ms 触发开机
+     * 3. 拉高（释放）
+     * 4. 等待 3-5s 让模组冷启动
+     */
+    gpio_set_level(P4C5_4G_PWR_GPIO, 1);            // 1. 初始高
+    vTaskDelay(pdMS_TO_TICKS(100));                 // 稳定
+    gpio_set_level(P4C5_4G_PWR_GPIO, 0);            // 2. 拉低
+    vTaskDelay(pdMS_TO_TICKS(200));                 // 3. ≥100ms 触发
+    gpio_set_level(P4C5_4G_PWR_GPIO, 1);            // 4. 释放拉高
+    ESP_LOGI(TAG, "ML307C PWRKEY pulse sent (200ms LOW + release)");
+
+    /* 模组冷启动约 3-5s */
+    vTaskDelay(pdMS_TO_TICKS(5000));
     return ESP_OK;
 }
 
