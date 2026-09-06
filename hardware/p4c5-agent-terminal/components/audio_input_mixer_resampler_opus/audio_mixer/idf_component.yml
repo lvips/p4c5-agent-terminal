@@ -1,0 +1,4 @@
+description: 4-channel to mono audio mixer (M3 voice uplink)
+version: "0.1.0"
+dependencies:
+  idf: ">=5.4.2"

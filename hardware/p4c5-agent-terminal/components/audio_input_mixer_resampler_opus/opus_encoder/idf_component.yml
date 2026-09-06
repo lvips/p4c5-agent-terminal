@@ -1,0 +1,5 @@
+description: OPUS 语音编码器封装（M3 语音上行）
+version: "0.1.0"
+dependencies:
+  idf: ">=5.4.2"
+  78/esp-opus: "^1.0.5"
