@@ -326,12 +326,15 @@ esp_err_t axp2101_set_chg_timeout_setting(uint8_t data);
 
 /**
  * @brief Gets charging target voltage setting
- * 
- * [5:0] Target voltage value  
- *   - Step: 16 mV/bit  
- *   - Range: 3.504 V (0x00) to 4.608 V (0x3F)  
- * [7:6] Reserved  
- * 
+ *
+ * AXP2101 REG 0x64: CV charger voltage setting (datasheet 6.13.2.62)
+ * [7:3] Read-only (always 0)
+ * [2:0] Charge voltage limit:
+ *   000 = 5.0V   001 = 4.0V   010 = 4.1V
+ *   011 = 4.2V   100 = 4.35V  101 = 4.4V
+ *   11X = reserved
+ * Default: 011b (4.2V)
+ *
  * @param pData Pointer to byte to retrieve voltage configuration
  * @return esp_err_t ESP_OK when succesful
  */
@@ -339,12 +342,15 @@ esp_err_t axp2101_get_chg_voltage_setting(uint8_t *pData);
 
 /**
  * @brief Sets charging target voltage
- * 
- * [5:0] Target voltage value  
- *   - Step: 16 mV/bit  
- *   - Range: 3.504 V (0x00) to 4.608 V (0x3F)  
- * [7:6] Reserved  
- * 
+ *
+ * AXP2101 REG 0x64: CV charger voltage setting (datasheet 6.13.2.62)
+ * [7:3] Read-only (hardware ignores writes)
+ * [2:0] Charge voltage limit:
+ *   000 = 5.0V   001 = 4.0V   010 = 4.1V
+ *   011 = 4.2V   100 = 4.35V  101 = 4.4V
+ *   11X = reserved
+ * Default: 011b (4.2V)
+ *
  * @param data Value to write to voltage configuration register
  * @return esp_err_t ESP_OK when succesful
  */

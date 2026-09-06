@@ -12,12 +12,15 @@
  *   2. axp2101_check_chip_id() — 验证 0x03 = 0x4A
  *   3. axp2101_set_dcdc_voltage/enabled — DCDC1 = 3.3V
  *   4. axp2101_set_ldo_voltage/enabled — ALDO1=1.8V, ALDO3=3.3V, ALDO4=2.9V
- *   5. 写 14 个特殊寄存器（0x64 修正为 0x2B = 4.2V）
+ *   5. 写 13 个特殊寄存器（0x64 用 RMW 模式验证，bits[2:0]=011=4.2V）
  *   6. axp2101_enable_pmu_adc_channels — 使能电池/系统电压 ADC
  *
- * 关键修正：
- *   🔴 0x64 (CHG_VOLTAGE_SETTING): xiaozhi 写 0x03 (3.55V) → 本项目修正为 0x2B (4.192V ≈ 4.2V)
- *      理由：3.55V 只充到 ~40% 容量，严重缩短续航。标准锂电池满充电压 4.2V。
+ * T11 修正（M10 实测发现）：
+ *   0x64 (CHG_VOLTAGE_SETTING): 之前误写 0x2B，以为读回 0x03 是 3.55V。
+ *   AXP2101 规格书：reg 0x64 bits[7:3] 只读=0, bits[2:0] 可写=充电截止电压。
+ *     000=5.0V 001=4.0V 010=4.1V 011=4.2V 100=4.35V 101=4.4V
+ *   写入 0x2B → 硬件屏蔽 bits[7:3] → 实际存储 0x03 → bits[2:0]=011=4.2V ✅
+ *   读回 0x03 是正确值，不是 bug！改为 RMW 模式让验证通过。
  *
  * 风险标注（代码中均用 ⚠️ 标记）：
  *   R2.1: ALDO4 = 2.9V 可能不够 ML307C（标称 3.4-4.2V），M1 实测
@@ -79,9 +82,9 @@ static const pmic_reg_entry_t s_init_seq[] = {
     { 0x90, 0x02, true,  "LDO_EN_CTRL_0",
       "ALDO2使能 (读改写, bit1 OR)",
       "R2.4: ALDO2 本项目未用, 保持兼容 (~1mA)" },
-    { 0x64, 0x2B, false, "CHG_VOLTAGE_SETTING",
-      "充电截止电压=4.192V (3.504+43×0.016)",
-      "R2.2: 🔴 xiaozhi原值0x03(3.55V)已修正为0x2B(4.2V)" },
+    { 0x64, 0x03, true,  "CHG_VOLTAGE_SETTING",
+      "充电截止电压=4.2V (bits[2:0]=011b; bits[7:3]硬件只读)",
+      "R2.2: ✅ 0x03=4.2V 已是正确值（之前误以为需要 0x2B）" },
     { 0x61, 0x05, false, "PRECHARGE_SETTING",
       "预充电流=125mA (5×25mA)", NULL },
     { 0x62, 0x0A, false, "FASTCHARGE_SETTING",
@@ -162,15 +165,15 @@ static esp_err_t create_i2c_device(void)
 }
 
 /* ──────────────────────────────────────────────
- * 写 14 个特殊寄存器
+ * 写 13 个特殊寄存器
  *
  * 严格按 xiaozhi Pmic::Pmic() 构造函数的写入顺序。
- * 🔴 0x64 修正: 0x03 → 0x2B (充电截止电压 3.55V → 4.2V)
+ * 🔴 T11 修正: 0x64 用 RMW 模式验证（bits[2:0]=011=4.2V，bits[7:3]硬件只读=0）
  * ────────────────────────────────────────────── */
 
 static esp_err_t write_special_registers(void)
 {
-    ESP_LOGI(TAG, "Writing %d special registers (0x64 corrected to 0x2B = 4.2V)",
+    ESP_LOGI(TAG, "Writing %d special registers (0x64 RMW: 0x03=4.2V)",
              INIT_SEQ_SIZE);
 
     for (int i = 0; i < (int)INIT_SEQ_SIZE; i++) {

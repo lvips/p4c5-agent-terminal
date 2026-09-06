@@ -277,5 +277,37 @@ AXP2101 REG 0x64: CV Charger Voltage Setting
 - xiaozhi 驱动: `pmic_axp2101/axp2101.c` L604-613
 - P4C5 驱动: `p4c5_pmic/p4c5_pmic.cc` (T11 修正版)
 - M10 实测日志: `/tmp/m10_log.txt`
-- Audit 报告: `docs/hw/pmic-registers-audit.md`
 - OMT/Tab5 调查: agent "Find xiaozhi axp2101 code"
+
+---
+
+## 9. T11 硬件验证结果（CCA 烧录验证）
+
+### 9.1 验证固件
+
+| 项 | 值 |
+|---|---|
+| 固件 | `p4c5_agent_terminal.bin` (0x103150 bytes) |
+| 芯片 | ESP32-P4 v1.3, ECO2 |
+| IDF | ESP-IDF v5.5.5 |
+| Commit | T11 提交后 |
+
+### 9.2 串口日志（PMIC 部分）
+
+```
+I (1689) p4c5_pmic: === AXP2101 PMIC init (addr=0x34) ===
+I (1700) p4c5_pmic: AXP2101 chip ID verified (0x4A)
+I (1781) p4c5_pmic: Writing 13 special registers (0x64 RMW: 0x03=4.2V)
+I (1814) p4c5_pmic:   [0x64] CHG_VOLTAGE_SETTING: 0x03 | 0x03 = 0x03 (...)
+I (1932) p4c5_pmic:   ✅ [0x64] CHG_VOLTAGE_SETTING: 0x03 (bits OK)
+...
+I (1978) p4c5_pmic: All 13 registers verified ✅
+I (1988) p4c5_pmic: === AXP2101 PMIC init complete ===
+```
+
+### 9.3 结论
+
+- ✅ **0x64 验证通过**：`0x03 & 0x03 == 0x03` → bits OK
+- ✅ **全部 13 寄存器通过**：无 mismatch 警告
+- ✅ **充电截止电压 = 4.2V**：bits[2:0] = `011b`，与规格书一致
+- ✅ **M10 "bug" 已彻底解决**：之前误报的"0x64 读回异常"已消除

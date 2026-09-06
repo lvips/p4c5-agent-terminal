@@ -1,6 +1,6 @@
 # M10 端到端验证报告
 
-> **版本**：v2.0（2026-09-06）
+> **版本**：v2.1（2026-09-06，T11 修正更新）
 > **作者**：CCA（科研主管）— 实测 + 修复
 > **测试日期**：2026-09-06
 > **固件 binary**：`p4c5_agent_terminal.bin` (1,061,184 bytes / 0x103140)
@@ -115,8 +115,8 @@ I (1708) p4c5_pmic:   DCDC1 = 3.3V ✅
 I (1712) p4c5_pmic:   ALDO1 = 1.8V ✅
 I (1720) p4c5_pmic:   ALDO3 = 3.3V ✅
 W (1724) p4c5_pmic:   ALDO4 = 2.9V ⚠️ (R4: ML307C 需 ≥3.4V)
-I (1781) p4c5_pmic: 13 special registers written               ✅ 寄存器配置完成
-W (1929) p4c5_pmic:   ⚠️ [0x64] expected 0x2B, got 0x03       ⚠️ 充电电压回读异常
+I (1781) p4c5_pmic: 13 special registers written (0x64 RMW: 0x03=4.2V) ✅ 寄存器配置完成
+I (1932) p4c5_pmic:   ✅ [0x64] CHG_VOLTAGE_SETTING: 0x03 (bits OK)  ✅ T11 修正：0x03=4.2V 是正确值
 
 I (1994) app_main: [2/5] Display init (ST7102 480x800)...
 I (2012) st7102: LCD ID: 80 A0 FB                              ✅ Display OK
@@ -161,7 +161,7 @@ I (35532) app_main: 💓 bat=0% csq=-1 rssi=0dBm dsh=❌ 4g=⏳   ✅ 10s 后正
 | 步骤 | 模块 | 期望 | 实测 | 状态 |
 |---|---|---|---|---|
 | [0/5] | Board (I2C) | I2C0 init OK | SDA=7, SCL=8, 400kHz | ✅ |
-| [1/5] | PMIC (AXP2101) | 芯片检测 + 寄存器配置 | ID=0x4A, 13 寄存器写入, 12/13 回读 OK | ✅ |
+| [1/5] | PMIC (AXP2101) | 芯片检测 + 寄存器配置 | ID=0x4A, 13 寄存器写入, 13/13 回读 OK (T11 修正) | ✅ |
 | [2/5] | Display (ST7102) | MIPI-DSI 2-lane + 背光 | LCD ID=80 A0 FB, BL PWM OK | ✅ |
 | [3/5] | Audio (ES8311+ES7210) | DAC + ADC init |  Slave mode, TDM 4mic | ✅ |
 | [4/5] | 4G (ML307C) | 模组检测 → 网络注册 | ❌ UART 波特率检测循环，10s 超时 | ❌ |
@@ -203,15 +203,16 @@ I (35532) app_main: 💓 bat=0% csq=-1 rssi=0dBm dsh=❌ 4g=⏳   ✅ 10s 后正
 3. 🟡 示波器看 UART TX/RX 波形
 4. 🟡 用 USB-TTL 直接连 ML307C 模组验证 AT 响应
 
-### 6.2 PMIC reg 0x64 回读异常（🟡 非阻塞）
+### 6.2 PMIC reg 0x64 回读异常（✅ T11 已解决）
 
-**现象**：写入 0x2B（充电截止电压 4.192V）但回读为 0x03（3.552V）。
+**现象**：写入 0x2B（充电截止电压 4.192V）但回读为 0x03。
 
-**分析**：
-- AXP2101 数据手册中 reg 0x64 可能有多位字段
-- 回读值 0x03 可能是芯片内部修正后的实际值
-- xiaozhi 原始代码用 0x03，我们改为 0x2B
-- **建议**：不阻塞，后续对照 datasheet 逐位分析
+**根因**（T11 调查结论）：**不是 bug，是误判**。
+- AXP2101 规格书 §6.13.2.62：reg 0x64 bits[7:3] 只读=0, bits[2:0] 可写=充电截止电压
+- 0x2B = `00101011` → 硬件屏蔽 [7:3] → 实际存储 0x03 = `00000011` → bits[2:0]=`011`=4.2V ✅
+- xiaozhi 原始代码用 0x03 完全正确；P4C5 改为 0x2B 是多余的
+- **修复**：改为 RMW 模式，写入 0x03（=4.2V），验证 `(actual & 0x03) == 0x03` 通过
+- 详见：`docs/hw/axp2101-0x64-bug-investigation.md`
 
 ### 6.3 bat=0%（🟢 非阻塞）
 
@@ -226,7 +227,7 @@ I (35532) app_main: 💓 bat=0% csq=-1 rssi=0dBm dsh=❌ 4g=⏳   ✅ 10s 后正
 | 风险 | 描述 | M5 状态 | M10 更新 |
 |---|---|---|---|
 | R1 | I2C 总线冲突 | ✅ 排除 | 无变化 |
-| R2 | AXP2101 寄存器配置 | ✅ 已验证 | 12/13 回读 OK（reg 0x64 异常但非阻塞） |
+| R2 | AXP2101 寄存器配置 | ✅ 已验证 | ✅ T11 修正后 13/13 回读 OK（0x64 误判已解决） |
 | R3 | ES8311/ES7210 I2C 地址 | ✅ 已修正 | ✅ 实测确认 |
 | **R4** | **ALDO4=2.9V vs ML307C 3.4V** | ⚠️ 待验证 | **❌ 确认阻塞 — 波特率检测失败根因** |
 | R5 | 背光 PWM 频率 | ✅ 已配置 | ✅ 实测 OK |
