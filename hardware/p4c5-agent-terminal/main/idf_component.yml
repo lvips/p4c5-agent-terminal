@@ -5,18 +5,18 @@ dependencies:
   espressif/esp_audio_codec: "~2.4.1"       # ES8311 + ES7210 codec 驱动
   espressif/esp_codec_dev: "~1.5.9"          # codec_dev 设备抽象层 (esp_audio_codec 依赖)
   78/esp-ml307: "~3.6.4"                    # ML307C 4G 模组协议栈
-  78/esp-wifi-connect: "~3.1.1"             # WiFi 连接管理
+  # 78/esp-wifi-connect: "~3.1.1"             # WiFi 连接管理（M5 暂时禁用）
   lvgl/lvgl: "~9.4.0"                       # LVGL 图形库
   esp_lvgl_port: "~2.7.0"                   # LVGL ESP-IDF 适配层
   espressif/esp_lcd_touch_st7123: "^1.0.0"  # ST7123 触摸驱动
-  espressif/esp_hosted:
-    version: "2.12.3"                       # P4↔C5 WiFi 协处理
-    rules:
-      - if: target in [esp32p4]
-  espressif/esp_wifi_remote:
-    version: "1.4.0"
-    rules:
-      - if: target in [esp32p4]
+  # espressif/esp_hosted:                       # P4↔C5 WiFi 协处理（M5 暂时禁用）
+  #   version: "2.12.3"
+  #   rules:
+  #     - if: target in [esp32p4]
+  # espressif/esp_wifi_remote:                  # WiFi remote（M5 暂时禁用）
+  #   version: "1.4.0"
+  #   rules:
+  #     - if: target in [esp32p4]
 
   ## ── 本项目自定义组件（路径引用） ──
   p4c5_board:
@@ -38,4 +38,4 @@ dependencies:
 
   ## ── IDF 版本 ──
   idf:
-    version: ">=5.5.2"
+    version: ">=5.4.0"
