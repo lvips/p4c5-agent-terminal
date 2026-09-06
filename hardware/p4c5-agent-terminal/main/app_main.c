@@ -216,7 +216,7 @@ void app_main(void)
         .ap_ssid_prefix = "p4c5-agent",
         .ap_ssid = NULL,
         .ap_password = NULL,
-        .ap_behavior = "fallback",
+        .ap_behavior = "keep",  // W1 fix: "fallback" 无效, 有效值: "" / "keep" / "close_on_sta"
         .ap_channel = 1,
         .ap_max_conn = 4,
         .max_retry = 5,
