@@ -349,7 +349,37 @@ static void audio_uplink_task(void *arg)
             }
         }
 
+        /* 7. 实时音频诊断 - 每 50 帧 (~1s) 输出 mic/ref/aec RMS
+         *    便于调试 AEC 收敛 (期望 mic_RMS ≈ aec_RMS << ref_RMS 时回声消除成功)
+         */
         frame_count++;
+        if ((frame_count % 50) == 0) {
+            auto calc_rms = [](const int16_t *buf, size_t n) -> uint32_t {
+                uint64_t sum_sq = 0;
+                for (size_t i = 0; i < n; i++) {
+                    int32_t v = buf[i];
+                    sum_sq += (uint64_t)(v * v);
+                }
+                uint32_t mean = (uint32_t)(sum_sq / n);
+                /* 整数平方根 (牛顿法) */
+                uint32_t x = mean;
+                uint32_t y = (x + 1) >> 1;
+                while (y < x) {
+                    x = y;
+                    y = (x + mean / x) >> 1;
+                }
+                return x;
+            };
+            uint32_t mic_rms = calc_rms(s_mic_mono, FRAME_SAMPLES_24K);
+            uint32_t ref_rms = calc_rms(s_ref_mono, FRAME_SAMPLES_24K);
+            uint32_t aec_rms = calc_rms(s_aec_out,   FRAME_SAMPLES_24K);
+            ESP_LOGI("audio_diag",
+                     "frame=%llu mic=%u ref=%u aec=%u aec/mic=%u%% "
+                     "(期望: ref>>mic, aec<<mic 表示 AEC 收敛)",
+                     (unsigned long long)frame_count,
+                     (unsigned)mic_rms, (unsigned)ref_rms, (unsigned)aec_rms,
+                     (unsigned)((aec_rms * 100) / (mic_rms ? mic_rms : 1)));
+        }
     }
 }
 
