@@ -1,7 +1,7 @@
 # main component CMakeLists.txt
 # 最小入口，依赖 p4c5_board 统一初始化
 
-set(SOURCES "app_main.c")
+set(SOURCES "app_main.cpp")
 
 idf_component_register(SRCS ${SOURCES}
     INCLUDE_DIRS "."
@@ -14,6 +14,10 @@ idf_component_register(SRCS ${SOURCES}
         wifi_manager
         p4c5_ui
         dsh_client
+        audio_mixer                # W3: 4ch→1ch 混音
+        aec_sw                     # W3: 软件 AEC 回声消除 (NLMS)
+        resampler_24_16            # W3: 24kHz→16kHz 重采样
+        opus_encoder               # W3: libopus 编码 (16kbps, 20ms 帧)
         nvs_flash
         esp_driver_gpio
         esp_driver_i2c

@@ -544,18 +544,25 @@ esp_err_t p4c5_audio_enable_input(bool enable)
     }
 
     if (enable) {
-        /* 打开输入设备：配置采样格式 */
+        /* 打开输入设备：配置采样格式
+         *
+         * W3: 全开 4 通道 (ch0+ch1+ch2+ch3), 让上层 audio_uplink_task 自行分离:
+         *   - ch0 = MIC1 (主麦)
+         *   - ch1 = AEC ref (扬声器回采, P4C5_AUDIO_INPUT_REF=true 时由硬件回采)
+         *   - ch2 = MIC3 (副麦)
+         *   - ch3 = MIC4 (备用麦)
+         * 参考: xiaozhi BoxAudioCodec::EnableInput() 也开全部 4 通道
+         */
         esp_codec_dev_sample_info_t fs = {
             .bits_per_sample = 16,
             .channel = 4,
-            .channel_mask = ESP_CODEC_DEV_MAKE_CHANNEL_MASK(0),
+            .channel_mask = ESP_CODEC_DEV_MAKE_CHANNEL_MASK(0) |
+                            ESP_CODEC_DEV_MAKE_CHANNEL_MASK(1) |
+                            ESP_CODEC_DEV_MAKE_CHANNEL_MASK(2) |
+                            ESP_CODEC_DEV_MAKE_CHANNEL_MASK(3),
             .sample_rate = (uint32_t)s_output_sample_rate,
             .mclk_multiple = 0,
         };
-        /* AEC 参考通道：启用 channel 1 */
-        if (P4C5_AUDIO_INPUT_REF) {
-            fs.channel_mask |= ESP_CODEC_DEV_MAKE_CHANNEL_MASK(1);
-        }
 
         esp_err_t err = esp_codec_dev_open(s_input_dev, &fs);
         if (err != ESP_OK) {

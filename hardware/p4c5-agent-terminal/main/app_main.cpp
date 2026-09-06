@@ -22,6 +22,10 @@
 #include "p4c5_ui.h"
 #include "dsh_client.h"
 #include "wifi_manager.h"
+#include "audio_mixer.h"           /* W3: 4ch→1ch 混音 (OMT 移植) */
+#include "aec_sw.h"                /* W3: 软件 AEC 回声消除 (NLMS, P4 自实现) */
+#include "resampler_24_16.h"       /* W3: 24kHz→16kHz 重采样 (适配 p4c5_audio 24kHz) */
+#include "opus_encoder.h"          /* W3: libopus 编码 (16kbps, 20ms 帧) */
 #include "config.h"
 #include <string.h>
 
@@ -29,6 +33,9 @@ static const char *TAG = "app_main";
 
 /* W2: 收到的最后一个 tool_call id (用于回 tool_result) */
 static char w2_last_tool_id[64] = {0};
+
+/* W3: 录音门控 (POC: 串口命令触发, 类似 OMT `s_app_recording`) */
+static volatile bool s_audio_recording = false;
 
 /* ── DSH 帧回调 (W2: 处理全部 14 类下行帧) ── */
 static void on_dsh_frame(const char *frame_type, cJSON *json, void *user_data)
@@ -196,20 +203,185 @@ static void on_4g_event(p4c5_4g_event_t event, const char *data, void *user_data
 }
 */
 
+/* ══════════════════════════════════════════════════════════
+ * W3 Phase 1: 音频上行链路 (OMT 等同功能) - 含软件 AEC
+ *
+ *   链路: p4c5_audio_record_multi (4ch 24kHz)
+ *       → 4 通道分离: ch0+ch2 → mic, ch1 → AEC ref, ch3 → unused
+ *       → aec_sw (NLMS 回声消除, ch1 作为参考)  [POC: 简化版]
+ *       → audio_mixer (若需要, 单声道已分好)
+ *       → resampler_24_16 (24k→16k)
+ *       → opus_encoder_encode (16kbps, 20ms 帧)
+ *       → dsh_client_send_audio (WS Binary 帧)
+ *
+ *   触发: s_audio_recording = true (通过串口命令 audio start/stop)
+ *
+ *   AEC 限制 (诚实):
+ *     - ESP32-P4 不支持 ESP-SR AFE 硬件加速 (仅 ESP32-S3 可用)
+ *     - 自实现 NLMS 是 POC 简化版, 质量 < ESP-SR AFE
+ *     - 仅当硬件真有 AEC ref 回采 (ES8311 输出 → ES7210 MIC2) 时有效
+ *     - 否则 ch1 实际是 MIC2, AEC 处理无意义
+ *
+ *   参考开源案例:
+ *     - xiaozhi ESP-SR AFE: github.com/espressif/esp-sr
+ *     - speexdsp AEC: 嵌入式首选 (但 ~50KB ROM, P4 资源有限)
+ *     - WebRTC APM: 最佳但 ~200KB RAM, P4 不适合
+ * ══════════════════════════════════════════════════════════ */
+
+static void audio_uplink_task(void *arg)
+{
+    (void)arg;
+
+    /* 20ms 帧规格 (适配 p4c5_audio 24kHz) */
+    constexpr size_t FRAME_SAMPLES_24K = 480;   /* 24kHz × 0.020s = 480 samples */
+    constexpr size_t FRAME_SAMPLES_16K = 320;   /* 16kHz × 0.020s = 320 samples */
+
+    static int16_t s_in4ch_buf[480 * 4];        /* 4ch × 480 = 1920 samples = 3840 bytes */
+    static int16_t s_mic_mono[480];             /* ch0+ch2 平均 → mono 24kHz */
+    static int16_t s_ref_mono[480];             /* ch1 → AEC ref 24kHz */
+    static int16_t s_aec_out[480];              /* AEC 后 mono 24kHz */
+    static int16_t s_mono16k[320];              /* resampler 输出 16kHz */
+    static uint8_t s_opus_buf[1276];            /* OPUS max packet (RFC 6716) */
+
+    /* ── 初始化 3 组件 + 软件 AEC ── */
+    audio::AudioMixerConfig mixer_cfg = audio::audio_mixer_default_config();
+    mixer_cfg.in_channels = 4;
+    mixer_cfg.sample_rate = 24000;
+    ESP_ERROR_CHECK(audio::audio_mixer_init(mixer_cfg));
+
+    audio::AecConfig aec_cfg = audio::aec_sw_default_config();
+    aec_cfg.sample_rate     = 24000;
+    aec_cfg.filter_taps     = 128;          /* 5.3ms @ 24kHz */
+    aec_cfg.step_size       = 0.005f;
+    aec_cfg.leakage         = 0.999f;
+    aec_cfg.ref_gain        = 1.0f;
+    aec_cfg.enable_aec      = P4C5_AUDIO_INPUT_REF;  /* 硬件有 ref 才开 */
+    ESP_ERROR_CHECK(audio::aec_sw_init(aec_cfg));
+
+    audio::ResamplerConfig res_cfg = audio::resampler_24_16_default_config();
+    ESP_ERROR_CHECK(audio::resampler_24_16_init(res_cfg));
+
+    audio::OpusEncoderConfig opus_cfg = audio::opus_encoder_default_config();
+    ESP_ERROR_CHECK(audio::opus_encoder_init(opus_cfg));
+
+    ESP_LOGI("audio_uplink", "W3 音频上行链路启动");
+    ESP_LOGI("audio_uplink", "  4ch@24kHz (ch0+ch2=mic, ch1=AEC_ref, ch3=unused)");
+    ESP_LOGI("audio_uplink", "  → 软件 AEC (NLMS, taps=%u, mu=%.4f)",
+             aec_cfg.filter_taps, aec_cfg.step_size);
+    ESP_LOGI("audio_uplink", "  → 24k→16k 重采样 → opus → WS Binary 上行");
+    ESP_LOGI("audio_uplink", "触发方式: 串口命令 'audio start' / 'audio stop'");
+
+    uint64_t frame_count = 0;
+    uint64_t sent_count  = 0;
+
+    for (;;) {
+        /* 录音门控 */
+        if (!s_audio_recording) {
+            vTaskDelay(pdMS_TO_TICKS(20));
+            continue;
+        }
+
+        /* 1. 4 通道 24kHz 录音 */
+        esp_err_t ret = p4c5_audio_record_multi(s_in4ch_buf, FRAME_SAMPLES_24K);
+        if (ret != ESP_OK) {
+            if ((frame_count % 250) == 0) {
+                ESP_LOGW("audio_uplink", "p4c5_audio_record_multi 失败: %s", esp_err_to_name(ret));
+            }
+            vTaskDelay(pdMS_TO_TICKS(20));
+            continue;
+        }
+
+        /* 2. 4 通道分离: ch0+ch2 → mic, ch1 → ref, ch3 → unused
+         *
+         * TDM 帧布局: [ch0_s0, ch1_s0, ch2_s0, ch3_s0, ch0_s1, ch1_s1, ...]
+         * mic = (ch0 + ch2) / 2
+         * ref = ch1 (扬声器回采)
+         */
+        for (size_t i = 0; i < FRAME_SAMPLES_24K; i++) {
+            int32_t ch0 = s_in4ch_buf[i * 4 + 0];
+            int32_t ch1 = s_in4ch_buf[i * 4 + 1];
+            int32_t ch2 = s_in4ch_buf[i * 4 + 2];
+            /* ch3 unused */
+
+            s_mic_mono[i] = (int16_t)((ch0 + ch2) / 2);
+            s_ref_mono[i] = (int16_t)ch1;
+        }
+
+        /* 3. 软件 AEC (NLMS): mic - estimated_echo → out
+         *
+         * 限制:
+         *   - 仅 P4C5_AUDIO_INPUT_REF=true 时有效
+         *   - 硬件需真有 AEC ref 回采 (ES8311 输出 → ES7210 MIC2)
+         */
+        ret = audio::aec_sw_process(s_mic_mono, s_ref_mono,
+                                     s_aec_out, FRAME_SAMPLES_24K);
+        if (ret != ESP_OK) {
+            frame_count++;
+            continue;
+        }
+
+        /* 4. 24kHz → 16kHz 重采样 (480 → 320 samples) */
+        size_t out_len = 0;
+        ret = audio::resampler_24_16_process(s_aec_out, s_mono16k, &out_len);
+        if (ret != ESP_OK || out_len != FRAME_SAMPLES_16K) {
+            frame_count++;
+            continue;
+        }
+
+        /* 5. Opus 编码 */
+        size_t opus_len = sizeof(s_opus_buf);
+        ret = audio::opus_encoder_encode(s_mono16k, FRAME_SAMPLES_16K,
+                                          s_opus_buf, &opus_len);
+        if (ret != ESP_OK) {
+            frame_count++;
+            continue;
+        }
+
+        /* 6. WS Binary 帧上行 */
+        esp_err_t send_ret = dsh_client_send_audio(s_opus_buf, opus_len);
+        if (send_ret == ESP_OK) {
+            sent_count++;
+            if ((sent_count % 250) == 0) {
+                ESP_LOGI("audio_uplink", "已发送 %llu 帧 (opus %u bytes/帧, AEC=%s)",
+                         (unsigned long long)sent_count, (unsigned)opus_len,
+                         aec_cfg.enable_aec ? "ON" : "OFF");
+            }
+        }
+
+        frame_count++;
+    }
+}
+
+/* ── 串口命令处理 (POC: 解析 audio start/stop) ── */
+static void handle_audio_uart_cmd(const char *line)
+{
+    if (strncmp(line, "audio start", 11) == 0) {
+        s_audio_recording = true;
+        ESP_LOGI(TAG, "🎤 [W3] audio recording ON (4ch@24k + AEC + opus 上行链路启用)");
+    } else if (strncmp(line, "audio stop", 10) == 0) {
+        s_audio_recording = false;
+        ESP_LOGI(TAG, "🔇 [W3] audio recording OFF (上行链路暂停)");
+    } else if (strncmp(line, "audio status", 12) == 0) {
+        ESP_LOGI(TAG, "🎤 [W3] audio recording = %s",
+                 s_audio_recording ? "ON" : "OFF");
+    }
+}
+
 /* ══════════════════════════════════════════════════════════ */
 
-void app_main(void)
+/* app_main 是从 C 代码 (app_startup.c) 调用的, 必须用 extern "C" 避免 C++ mangling */
+extern "C" void app_main(void)
 {
     /* ── Watchdog ──────────────────────────────────────────────
      * 系统在 app_main 之前已经初始化了 TWDT（5s 超时，panic 模式）。
      * 尝试 reconfigure 为 30s；若失败（旧版 IDF 不支持）则继续
      * 使用系统默认配置，靠喂狗维持。
      * ─────────────────────────────────────────────────────────── */
-    esp_task_wdt_config_t wdt_cfg = {
-        .timeout_ms = 30000,
-        .trigger_panic = true,
-        .idle_core_mask = 0,   /* 不监控 idle task */
-    };
+    /* C++ 严格字段顺序: 按声明顺序 (timeout_ms → idle_core_mask → trigger_panic) */
+    esp_task_wdt_config_t wdt_cfg;
+    wdt_cfg.timeout_ms = 30000;
+    wdt_cfg.idle_core_mask = 0;   /* 不监控 idle task */
+    wdt_cfg.trigger_panic = true;
     esp_err_t wdt_err = esp_task_wdt_reconfigure(&wdt_cfg);
     if (wdt_err != ESP_OK) {
         ESP_LOGW(TAG, "TWDT reconfigure failed (%s), will feed existing WDT",
@@ -321,9 +493,13 @@ void app_main(void)
         ESP_LOGW(TAG, "DSH connect via WiFi failed (will retry): %s", esp_err_to_name(err));
     }
 
+    /* W3: 启动音频上行任务 (POC: 串口命令触发) */
+    xTaskCreate(audio_uplink_task, "audio_uplink", 16384, NULL, 5, NULL);
+
     ESP_LOGI(TAG, "=========================================");
     ESP_LOGI(TAG, "  All subsystems initialized");
     ESP_LOGI(TAG, "  v%s ready", P4C5_BOARD_VERSION);
+    ESP_LOGI(TAG, "  W3 提示: 串口输入 'audio start' 开始录音上行");
     ESP_LOGI(TAG, "=========================================");
 
     /* M7 → T14: 测试图 → LVGL 真 UI */

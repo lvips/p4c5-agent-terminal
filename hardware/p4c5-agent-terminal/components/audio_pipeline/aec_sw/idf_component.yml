@@ -1,0 +1,4 @@
+description: 软件 AEC 回声消除 (NLMS, 适配 4 麦 + AEC ref, W3 POC)
+version: "0.1.0"
+dependencies:
+  idf: ">=5.5.0"

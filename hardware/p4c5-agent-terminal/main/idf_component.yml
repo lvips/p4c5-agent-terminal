@@ -26,6 +26,8 @@ dependencies:
     path: ../components/p4c5_audio
   audio_mixer:                         # W3: 4ch→1ch 混音
     path: ../components/audio_pipeline/audio_mixer
+  aec_sw:                              # W3: 软件 AEC 回声消除 (NLMS)
+    path: ../components/audio_pipeline/aec_sw
   resampler_24_16:                     # W3: 24kHz→16kHz 重采样
     path: ../components/audio_pipeline/resampler_24_16
   opus_encoder:                        # W3: libopus 编码 (16kbps, 20ms 帧)
