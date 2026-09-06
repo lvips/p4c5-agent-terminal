@@ -1,0 +1,30 @@
+{
+  "name": "@p4c5-agent-terminal/dsh-cc-orchestrator",
+  "version": "1.0.0",
+  "description": "DSH Cordis Plugin: 双 CC 长驻编排 (CCA + CCB), 项目本地化",
+  "main": "code.host.js",
+  "scripts": {
+    "test": "node -e \"console.log('Plugin manifest OK')\""
+  },
+  "dsh": {
+    "bundle": {
+      "patch": {
+        "name": "cc-orchestrator",
+        "description": "CCA + CCB 双 CC 长驻编排 (项目本地, 不依赖全局 DSH 配置)",
+        "version": "1.0.0",
+        "author": "DSH (DeepSeek Harness)"
+      }
+    }
+  },
+  "keywords": [
+    "cordis",
+    "dsh",
+    "claude-code",
+    "cc",
+    "orchestrator",
+    "p4c5",
+    "esp32"
+  ],
+  "license": "Apache-2.0",
+  "dependencies": {}
+}
