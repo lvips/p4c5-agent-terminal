@@ -168,6 +168,7 @@ void app_main(void)
         ESP_LOGE(TAG, "PMIC init failed: %s", esp_err_to_name(err));
         return;
     }
+    p4c5_pmic_print_adc();  /* T15 自测电源 */
     esp_task_wdt_reset();
 
     /* [2] Display */

@@ -453,6 +453,70 @@ uint16_t p4c5_pmic_get_vbat_mv(void)
 }
 
 /* ──────────────────────────────────────────────
+ * 公开 API：VBUS 电压 (mV) - T15 自测电源
+ *   0x38 = VBUS 高字节
+ *   0x39 = VBUS 低字节
+ *   公式: VBUS(mV) = (hi << 4 | (lo & 0x0F)) * 1.7 mV
+ *   期望: 5000mV (USB 5V), 偏低表示 USB 限流/欠压
+ * ────────────────────────────────────────────── */
+
+uint16_t p4c5_pmic_get_vbus_mv(void)
+{
+    if (!s_initialized) return 0;
+
+    uint8_t hi = pmic_i2c_read_reg(0x38);
+    uint8_t lo = pmic_i2c_read_reg(0x39);
+
+    /* VBUS(mV) = ((hi << 4) | (lo & 0x0F)) * 1.7 */
+    uint16_t vbus = ((uint16_t)hi << 4) | (lo & 0x0F);
+    return (uint16_t)(vbus * 1.7f);
+}
+
+/* ──────────────────────────────────────────────
+ * 公开 API：PMIC ADC 自测（T15）
+ *   读 VBUS + VBAT + 回读 ALDO4 寄存器
+ * ────────────────────────────────────────────── */
+
+esp_err_t p4c5_pmic_read_adc(p4c5_pmic_adc_t *out)
+{
+    if (!s_initialized) return ESP_ERR_INVALID_STATE;
+    if (!out) return ESP_ERR_INVALID_ARG;
+
+    out->vbus_mv = p4c5_pmic_get_vbus_mv();
+    out->vbat_mv = p4c5_pmic_get_vbat_mv();
+    out->aldo4_reg = pmic_i2c_read_reg(0x95);
+    /* ALDO4: 0.5V + N×0.1V, N = reg value */
+    out->aldo4_mv = (uint16_t)((out->aldo4_reg * 100) + 500);
+
+    return ESP_OK;
+}
+
+void p4c5_pmic_print_adc(void)
+{
+    p4c5_pmic_adc_t adc;
+    if (p4c5_pmic_read_adc(&adc) != ESP_OK) {
+        ESP_LOGW(TAG, "ADC read failed");
+        return;
+    }
+    ESP_LOGI(TAG, "PMIC ADC self-test:");
+    ESP_LOGI(TAG, "  VBUS  = %u mV  %s",
+        adc.vbus_mv,
+        (adc.vbus_mv >= 4500) ? "(USB 5V ✅)" :
+        (adc.vbus_mv >= 4000) ? "(USB 偏低 ⚠️)" :
+        "(USB 欠压 ❌)");
+    ESP_LOGI(TAG, "  VBAT  = %u mV  %s",
+        adc.vbat_mv,
+        adc.vbat_mv == 0 ? "(无电池)" :
+        (adc.vbat_mv < 3000 ? "(电池欠压)" :
+         (adc.vbat_mv > 4200 ? "(电池充满)" : "(电池正常)")));
+    ESP_LOGI(TAG, "  ALDO4 = reg 0x95 = 0x%02X → %u mV  %s",
+        adc.aldo4_reg, adc.aldo4_mv,
+        adc.aldo4_reg == 0x18 ? "(xiaozhi 2.9V)" :
+        adc.aldo4_reg == 0x1D ? "(p4c5 R4 3.4V)" :
+        "(其他值)");
+}
+
+/* ──────────────────────────────────────────────
  * 公开 API：芯片温度 (°C × 10)
  *
  * ADC 寄存器:

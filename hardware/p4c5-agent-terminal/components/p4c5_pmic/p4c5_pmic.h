@@ -125,6 +125,32 @@ int16_t p4c5_pmic_get_die_temp_x10(void);
 esp_err_t p4c5_pmic_set_4g_power(bool on);
 
 /* ──────────────────────────────────────────────
+ * PMIC ADC 自测（T15 自测电源）
+ * ────────────────────────────────────────────── */
+
+/**
+ * @brief VBUS 电压（mV）
+ * 读 AXP2101 内部 ADC 寄存器 0x38/0x39。
+ * 期望 5000mV（USB 5V），偏低表示 USB 限流/欠压。
+ * @return VBUS 电压 mV，错误时返回 0
+ */
+uint16_t p4c5_pmic_get_vbus_mv(void);
+
+/**
+ * @brief PMIC ADC 自测（T15）
+ * 同时读 VBUS + VBAT + ALDO4 寄存器回读
+ */
+typedef struct {
+    uint16_t vbus_mv;
+    uint16_t vbat_mv;
+    uint8_t  aldo4_reg;
+    uint16_t aldo4_mv;
+} p4c5_pmic_adc_t;
+
+esp_err_t p4c5_pmic_read_adc(p4c5_pmic_adc_t *out);
+void p4c5_pmic_print_adc(void);
+
+/* ──────────────────────────────────────────────
  * 寄存器诊断
  * ────────────────────────────────────────────── */
 
