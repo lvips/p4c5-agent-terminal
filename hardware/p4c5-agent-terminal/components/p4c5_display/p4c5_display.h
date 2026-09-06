@@ -53,6 +53,12 @@ esp_err_t p4c5_display_power_on(bool on);
  */
 void p4c5_display_deinit(void);
 
+/**
+ * @brief 获取 LCD panel handle（供 app_main 测试用）
+ * @return panel handle，未初始化时返回 NULL
+ */
+void* p4c5_display_get_panel(void);
+
 #ifdef __cplusplus
 }
 #endif

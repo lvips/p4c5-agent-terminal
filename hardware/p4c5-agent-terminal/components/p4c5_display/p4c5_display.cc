@@ -211,3 +211,8 @@ void p4c5_display_deinit(void)
     ESP_LOGW(TAG, "Display deinit — TODO: full cleanup");
     s_initialized = false;
 }
+
+void* p4c5_display_get_panel(void)
+{
+    return (void*)s_panel;
+}
