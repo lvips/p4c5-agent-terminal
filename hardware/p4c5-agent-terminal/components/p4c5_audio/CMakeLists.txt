@@ -1,4 +1,5 @@
-# p4c5_audio component
+# p4c5_audio component — 完整音频子系统
+# ES8311 (DAC) + ES7210 (ADC) + NS4150B (PA) + I2S + AEC
 idf_component_register(
     SRCS "p4c5_audio.cc"
     INCLUDE_DIRS "."
@@ -7,4 +8,5 @@ idf_component_register(
         esp_driver_i2s
         esp_audio_codec
         pmic_axp2101
+        esp_codec_dev
 )

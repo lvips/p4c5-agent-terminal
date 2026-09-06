@@ -78,6 +78,7 @@ esp_err_t p4c5_board_init(void)
 
     /* Step 4: Audio (ES8311 + ES7210) */
     ESP_LOGI(TAG, "[4/5] Initializing audio (ES8311 + ES7210)...");
+    p4c5_audio_set_i2c_bus(s_i2c_bus);  /* 注入共享 I2C bus */
     ESP_RETURN_ON_ERROR(p4c5_audio_init(), TAG, "Audio init failed");
 
     /* Step 5: 4G modem (ML307C) */
