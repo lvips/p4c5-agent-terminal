@@ -29,6 +29,8 @@ dependencies:
     path: ../components/p4c5_pmic
   p4c5_4g:
     path: ../components/p4c5_4g
+  dsh_client:
+    path: ../components/dsh_client
 
   ## ── xiaozhi 参考组件（路径引用，需从 xiaozhi 复制） ──
   esp_lcd_st7102:

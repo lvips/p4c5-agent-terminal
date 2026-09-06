@@ -1,0 +1,6 @@
+## dsh_client — DSH JSON-over-WebSocket 协议层
+dependencies:
+  espressif/esp_websocket_client: "~1.1.0"
+  # cJSON 是 IDF 自带组件（json 组件），无需额外声明
+  idf:
+    version: ">=5.4.0"
