@@ -37,6 +37,12 @@ struct WakeDetectorConfig {
     uint32_t sleep_rms_threshold = 500;   // 睡眠 RMS 阈值
     uint32_t wake_hold_frames   = 5;      // 唤醒持续帧数 (5 帧 @ 20ms = 100ms)
     uint32_t sleep_hold_frames  = 100;    // 睡眠持续帧数 (100 帧 @ 20ms = 2s)
+    /* W4+: 自适应阈值 */
+    bool     adaptive_threshold = false; // 是否启用自适应阈值
+    uint32_t noise_floor_alpha  = 1;     // 噪声底数 EMA 系数 (1/256)
+    uint32_t wake_delta         = 1000;  // wake 阈值 = noise_floor + delta
+    uint32_t sleep_delta        = 200;   // sleep 阈值 = noise_floor + delta
+    uint32_t noise_update_frames = 50;   // 每 N 帧更新一次 noise_floor
 };
 
 // 初始化

@@ -269,13 +269,18 @@ static void audio_uplink_task(void *arg)
     audio::OpusEncoderConfig opus_cfg = audio::opus_encoder_default_config();
     ESP_ERROR_CHECK(audio::opus_encoder_init(opus_cfg));
 
-    /* W4: 唤醒检测初始化 */
+    /* W4: 唤醒检测初始化 (自适应阈值: 自动适应环境噪声) */
     audio::WakeDetectorConfig wake_cfg;
     wake_cfg.sample_rate         = 24000;
-    wake_cfg.wake_rms_threshold  = 1500;  /* 唤醒 RMS 阈值 */
-    wake_cfg.sleep_rms_threshold = 500;   /* 睡眠 RMS 阈值 */
+    wake_cfg.wake_rms_threshold  = 1500;  /* 初始唤醒 RMS 阈值 (会被自适应覆盖) */
+    wake_cfg.sleep_rms_threshold = 500;   /* 初始睡眠 RMS 阈值 */
     wake_cfg.wake_hold_frames    = 5;     /* 100ms 持续唤醒 */
     wake_cfg.sleep_hold_frames   = 100;   /* 2s 持续静音后睡眠 */
+    wake_cfg.adaptive_threshold  = true;  /* W4+: 启用自适应噪声阈值 */
+    wake_cfg.noise_floor_alpha   = 1;     /* EMA 系数 */
+    wake_cfg.wake_delta          = 1000;  /* wake 阈值 = noise_floor + 1000 */
+    wake_cfg.sleep_delta         = 200;   /* sleep 阈值 = noise_floor + 200 */
+    wake_cfg.noise_update_frames = 50;    /* 每 1s 更新一次 noise_floor */
     ESP_ERROR_CHECK(audio::wake_word_detector_init(wake_cfg));
 
     ESP_LOGI("audio_uplink", "W3+W4 音频上行链路启动");

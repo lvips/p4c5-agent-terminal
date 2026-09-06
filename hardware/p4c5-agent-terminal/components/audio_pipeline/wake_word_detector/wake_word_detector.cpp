@@ -28,6 +28,11 @@ static struct {
     uint64_t frames_processed;
     uint64_t wake_events;
     uint64_t sleep_events;
+    /* 自适应阈值 */
+    uint32_t noise_floor;           // 噪声底数 RMS (EMA)
+    uint32_t noise_update_counter;  // 噪声更新计数器
+    uint32_t current_wake_th;       // 当前 wake 阈值
+    uint32_t current_sleep_th;      // 当前 sleep 阈值
 } s_state = {};
 
 static uint32_t calc_rms(const int16_t *buf, size_t n)
@@ -62,12 +67,18 @@ esp_err_t wake_word_detector_init(const WakeDetectorConfig& cfg)
     s_state.frames_processed = 0;
     s_state.wake_events = 0;
     s_state.sleep_events = 0;
+    /* 自适应阈值初始化 */
+    s_state.noise_floor = cfg.wake_rms_threshold / 4;  /* 初始 noise_floor = 阈值的 1/4 */
+    s_state.noise_update_counter = 0;
+    s_state.current_wake_th = cfg.wake_rms_threshold;
+    s_state.current_sleep_th = cfg.sleep_rms_threshold;
     s_state.initialized = true;
     ESP_LOGI(TAG, "init OK (sample_rate=%d, wake_th=%u, sleep_th=%u, "
-                 "wake_hold=%u frames=%ums, sleep_hold=%u frames=%ums)",
+                 "wake_hold=%u frames=%ums, sleep_hold=%u frames=%ums, adaptive=%s)",
              cfg.sample_rate, cfg.wake_rms_threshold, cfg.sleep_rms_threshold,
              cfg.wake_hold_frames, cfg.wake_hold_frames * 1000 / (cfg.sample_rate / 480),
-             cfg.sleep_hold_frames, cfg.sleep_hold_frames * 1000 / (cfg.sample_rate / 480));
+             cfg.sleep_hold_frames, cfg.sleep_hold_frames * 1000 / (cfg.sample_rate / 480),
+             cfg.adaptive_threshold ? "ON" : "OFF");
     return ESP_OK;
 }
 
@@ -88,18 +99,50 @@ WakeEvent wake_word_detector_feed(const int16_t *pcm, size_t samples)
 
     uint32_t rms = calc_rms(pcm, samples);
 
+    /* W4+: 自适应阈值更新 (仅在 IDLE 状态更新 noise_floor)
+     *      避免说话时的 RMS 污染噪声估计
+     */
+    if (s_state.cfg.adaptive_threshold && !s_state.active) {
+        s_state.noise_update_counter++;
+        if (s_state.noise_update_counter >= s_state.cfg.noise_update_frames) {
+            /* EMA 更新: noise_floor = noise_floor * (1-α) + rms * α
+             * 简化整数运算: noise_floor += (rms - noise_floor) / 256
+             */
+            uint32_t alpha = s_state.cfg.noise_floor_alpha;
+            s_state.noise_floor += ((int32_t)rms - (int32_t)s_state.noise_floor) / 256 * alpha;
+            /* 钳位到合理范围 */
+            if (s_state.noise_floor > s_state.cfg.wake_rms_threshold / 2) {
+                s_state.noise_floor = s_state.cfg.wake_rms_threshold / 2;
+            }
+            /* 动态阈值 = noise_floor + delta */
+            s_state.current_wake_th = s_state.noise_floor + s_state.cfg.wake_delta;
+            s_state.current_sleep_th = s_state.noise_floor + s_state.cfg.sleep_delta;
+            s_state.noise_update_counter = 0;
+
+            /* 每 5 秒输出一次自适应状态 */
+            if ((s_state.frames_processed % 250) == 0) {
+                ESP_LOGI(TAG, "🔧 adaptive: noise_floor=%u wake_th=%u sleep_th=%u",
+                         s_state.noise_floor, s_state.current_wake_th, s_state.current_sleep_th);
+            }
+        }
+    }
+
+    /* 选择当前使用的阈值 */
+    uint32_t wake_th  = s_state.cfg.adaptive_threshold ? s_state.current_wake_th  : s_state.cfg.wake_rms_threshold;
+    uint32_t sleep_th = s_state.cfg.adaptive_threshold ? s_state.current_sleep_th : s_state.cfg.sleep_rms_threshold;
+
     /* 状态机 */
     if (!s_state.active) {
         /* 当前 IDLE: 检测唤醒 */
-        if (rms > s_state.cfg.wake_rms_threshold) {
+        if (rms > wake_th) {
             s_state.wake_count++;
             if (s_state.wake_count >= s_state.cfg.wake_hold_frames) {
                 s_state.active = true;
                 s_state.wake_count = 0;
                 s_state.sleep_count = 0;
                 s_state.wake_events++;
-                ESP_LOGI(TAG, "🌟 WAKE detected! (RMS=%u, events=%llu)",
-                         rms, (unsigned long long)s_state.wake_events);
+                ESP_LOGI(TAG, "🌟 WAKE detected! (RMS=%u, threshold=%u, events=%llu)",
+                         rms, wake_th, (unsigned long long)s_state.wake_events);
                 return WakeEvent::WAKE;
             }
         } else {
@@ -109,15 +152,15 @@ WakeEvent wake_word_detector_feed(const int16_t *pcm, size_t samples)
         }
     } else {
         /* 当前 ACTIVE: 检测睡眠 */
-        if (rms < s_state.cfg.sleep_rms_threshold) {
+        if (rms < sleep_th) {
             s_state.sleep_count++;
             if (s_state.sleep_count >= s_state.cfg.sleep_hold_frames) {
                 s_state.active = false;
                 s_state.sleep_count = 0;
                 s_state.wake_count = 0;
                 s_state.sleep_events++;
-                ESP_LOGI(TAG, "💤 SLEEP detected (RMS=%u, events=%llu)",
-                         rms, (unsigned long long)s_state.sleep_events);
+                ESP_LOGI(TAG, "💤 SLEEP detected (RMS=%u, threshold=%u, events=%llu)",
+                         rms, sleep_th, (unsigned long long)s_state.sleep_events);
                 return WakeEvent::SLEEP;
             }
         } else {
@@ -129,8 +172,9 @@ WakeEvent wake_word_detector_feed(const int16_t *pcm, size_t samples)
 
     /* 每 50 帧 (~1s) 输出 RMS 状态 */
     if ((s_state.frames_processed % 50) == 0) {
-        ESP_LOGD(TAG, "RMS=%u wake_count=%u sleep_count=%u active=%d",
-                 rms, s_state.wake_count, s_state.sleep_count, (int)s_state.active);
+        ESP_LOGD(TAG, "RMS=%u wake_count=%u sleep_count=%u active=%d th=(%u,%u)",
+                 rms, s_state.wake_count, s_state.sleep_count, (int)s_state.active,
+                 wake_th, sleep_th);
     }
 
     return WakeEvent::NONE;
@@ -138,11 +182,13 @@ WakeEvent wake_word_detector_feed(const int16_t *pcm, size_t samples)
 
 void wake_word_detector_print_stats()
 {
-    ESP_LOGI(TAG, "📊 [stats] frames=%llu wake=%llu sleep=%llu active=%d",
+    ESP_LOGI(TAG, "📊 [stats] frames=%llu wake=%llu sleep=%llu active=%d "
+                 "noise_floor=%u wake_th=%u sleep_th=%u",
              (unsigned long long)s_state.frames_processed,
              (unsigned long long)s_state.wake_events,
              (unsigned long long)s_state.sleep_events,
-             (int)s_state.active);
+             (int)s_state.active,
+             s_state.noise_floor, s_state.current_wake_th, s_state.current_sleep_th);
 }
 
 }  // namespace audio
