@@ -165,12 +165,24 @@ static void draw_test_pattern(void)
 
 void app_main(void)
 {
-    /* Watchdog */
+    /* ── Watchdog ──────────────────────────────────────────────
+     * 系统在 app_main 之前已经初始化了 TWDT（5s 超时，panic 模式）。
+     * 尝试 reconfigure 为 30s；若失败（旧版 IDF 不支持）则继续
+     * 使用系统默认配置，靠喂狗维持。
+     * ─────────────────────────────────────────────────────────── */
     esp_task_wdt_config_t wdt_cfg = {
         .timeout_ms = 30000,
         .trigger_panic = true,
+        .idle_core_mask = 0,   /* 不监控 idle task */
     };
-    esp_task_wdt_init(&wdt_cfg);
+    esp_err_t wdt_err = esp_task_wdt_reconfigure(&wdt_cfg);
+    if (wdt_err != ESP_OK) {
+        ESP_LOGW(TAG, "TWDT reconfigure failed (%s), will feed existing WDT",
+                 esp_err_to_name(wdt_err));
+    } else {
+        ESP_LOGI(TAG, "TWDT reconfigured to 30s");
+    }
+    /* 确保当前 main task 已注册到 WDT */
     esp_task_wdt_add(NULL);
 
     ESP_LOGI(TAG, "=== p4c5-agent-terminal v%s ===", P4C5_BOARD_VERSION);
@@ -182,6 +194,7 @@ void app_main(void)
         ESP_LOGE(TAG, "Board init failed: %s", esp_err_to_name(err));
         return;
     }
+    esp_task_wdt_reset();   /* 喂狗 */
 
     /* [1] PMIC */
     ESP_LOGI(TAG, "[1/5] PMIC init (AXP2101)...");
@@ -190,6 +203,7 @@ void app_main(void)
         ESP_LOGE(TAG, "PMIC init failed: %s", esp_err_to_name(err));
         return;
     }
+    esp_task_wdt_reset();
 
     /* [2] Display */
     ESP_LOGI(TAG, "[2/5] Display init (ST7102 480x800)...");
@@ -199,6 +213,7 @@ void app_main(void)
         return;
     }
     p4c5_display_bl_set(80);
+    esp_task_wdt_reset();
 
     /* [3] Audio */
     ESP_LOGI(TAG, "[3/5] Audio init (ES8311+ES7210)...");
@@ -207,6 +222,7 @@ void app_main(void)
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "Audio init failed (non-fatal): %s", esp_err_to_name(err));
     }
+    esp_task_wdt_reset();
 
     /* [4] 4G (ML307C) — 后台异步初始化 */
     ESP_LOGI(TAG, "[4/5] 4G init (ML307C, baud=%d)...", P4C5_4G_BAUD_RATE);
@@ -216,14 +232,38 @@ void app_main(void)
         ESP_LOGW(TAG, "4G init failed (non-fatal): %s", esp_err_to_name(err));
     }
 
-    /* [5] DSH Client — 使用 ML307 transport（4G WebSocket） */
-    ESP_LOGI(TAG, "[5/5] DSH client init...");
-
-    /* 等模组检测完成（最多 10s），否则回退到 WiFi transport */
+    /* ── 等待模组检测（最多 10s）─────────────────────────
+     * ⚠️ 必须在循环内喂狗！系统 TWDT 超时=5s，不喂会 panic。
+     * 如果模组检测成功，使用 ML307 transport；否则回退 WiFi transport。
+     * ─────────────────────────────────────────────────────────── */
+    ESP_LOGI(TAG, "Waiting for modem detect (max 10s)...");
     int wait_count = 0;
     while (!p4c5_4g_is_modem_detected() && wait_count < 10) {
+        esp_task_wdt_reset();
         vTaskDelay(pdMS_TO_TICKS(1000));
         wait_count++;
+    }
+    bool use_ml307 = p4c5_4g_is_modem_detected();
+    ESP_LOGI(TAG, "Modem wait: %s after %ds",
+             use_ml307 ? "DETECTED" : "TIMEOUT", wait_count);
+
+    /* [5] DSH Client — 必须在 init 之前设置 transport */
+    ESP_LOGI(TAG, "[5/5] DSH client init...");
+
+    /* ⚠️ set_transport 必须在 init 之前调用 */
+    if (use_ml307) {
+        const dsh_transport_t *transport = p4c5_4g_get_transport();
+        if (transport) {
+            esp_err_t terr = dsh_client_set_transport(transport);
+            if (terr == ESP_OK) {
+                ESP_LOGI(TAG, "Using ML307 4G transport");
+            } else {
+                ESP_LOGW(TAG, "set_transport failed (%s), fallback to WiFi WS",
+                         esp_err_to_name(terr));
+            }
+        }
+    } else {
+        ESP_LOGI(TAG, "Modem not found, using default WiFi WS transport");
     }
 
     dsh_client_config_t dsh_cfg = {
@@ -237,21 +277,20 @@ void app_main(void)
     dsh_client_register_state_callback(on_dsh_state, NULL);
     dsh_client_set_status_provider(status_provider, NULL);
 
-    /* 尝试使用 ML307 transport */
-    if (p4c5_4g_is_modem_detected()) {
-        const dsh_transport_t *transport = p4c5_4g_get_transport();
-        if (transport) {
-            ESP_LOGI(TAG, "Using ML307 4G transport");
-            /* 注意：set_transport 必须在 init 之前调用。
-             * 但这里已经 init 了。需要在下次重构时修正。
-             * 当前先用默认 WS transport，connect 时会自动失败。 */
+    /* 连接 DSH
+     * ⚠️ 只在有可用网络时连接：
+     *   - ML307 模组检测到 → 通过 4G 连接（即使网络还没注册，transport 内部会等）
+     *   - 无 ML307 → WiFi transport 需要 esp_netif 初始化。
+     *     当前 build 未包含 WiFi netif 初始化，连接会导致 lwip assert。
+     *     待后续 WiFi 组件就绪后启用。
+     */
+    if (use_ml307) {
+        err = dsh_client_connect();
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "DSH connect via 4G failed (will retry): %s", esp_err_to_name(err));
         }
-    }
-
-    /* 连接 DSH（如果 4G 网络就绪则通过 ML307，否则失败不阻塞） */
-    err = dsh_client_connect();
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "DSH connect failed (will retry): %s", esp_err_to_name(err));
+    } else {
+        ESP_LOGW(TAG, "No network available (4G=❌, WiFi netif=not init). DSH connect deferred.");
     }
 
     ESP_LOGI(TAG, "=========================================");
