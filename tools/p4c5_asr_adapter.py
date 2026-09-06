@@ -1,50 +1,55 @@
 #!/usr/bin/env python3
 """
-P4C5 ASR Adapter — Mac 端语音识别代理
+P4C5 ASR Adapter — Mac 端语音识别代理 (OMT 同等配置)
 
-接收 ESP32-P4C5 WS Binary 上行的 OPUS 音频流
-  → 解码 (opuslib) 到 PCM Int16
-  → VAD (RMS 能量 + 静音超时)
-  → 调用阿里云 DashScope qwen3-asr-flash-realtime 流式 ASR
-  → 识别文字通过 WS JSON 帧 client/user_input 上行到 mock_dsh_server (或其他 DSH Adapter)
+完全复刻 OMT tab5-adapter/asr.js 的设计:
+  - 阿里云 NLS 一句话识别 (ISI, Intelligent Speech Interaction)
+  - REST POST: https://nls-gateway.cn-shanghai.aliyuncs.com/stream/v1/asr
+  - POP API signature v1 (HMAC-SHA1) 获取 token
+  - opusscript/opusscript-decoder 解码 OPUS → PCM Int16
+  - VAD: RMS 80/50, 静音 900ms 结束, 硬截止 20s
 
-设计参考: OMT tab5-adapter/asr.js (Node.js, ~250 行)
 P4C5 适配:
-  - 用 Python 替代 Node.js (DSH 偏好)
-  - 阿里云 DashScope (替代阿里云 NLS ISI, 阿里云官方推荐更新)
-  - 完整的 mock mode (无阿里云 key 时也能跑)
+  - Python 替代 Node.js (DSH 偏好)
+  - 完整复刻 OMT asr.js 的 VAD 逻辑
+  - 支持 mock 模式 (无阿里云 key 也能跑)
 
 使用方法:
   # Mock 模式 (不需要阿里云 key)
-  python3 tools/p4c5_asr_adapter.py --mock
+  python3 tools/p4c5_asr_adapter.py --mock --port 8766
 
-  # 真实 ASR 模式
-  export DASHSCOPE_API_KEY=sk-xxx
+  # 真实 ASR 模式 (需要阿里云 NLS 凭证)
+  export ALIYUN_ACCESS_KEY_ID=xxx
+  export ALIYUN_ACCESS_KEY_SECRET=xxx
+  export ALIYUN_NLS_APPKEY=xxx
   python3 tools/p4c5_asr_adapter.py --port 8766
 
 架构:
-  P4C5 ──WS Binary (opus)──> 本 ASR Adapter ──HTTP/WS──> 阿里云 DashScope
-       <──WS JSON (text)─────                            ↓ 识别文字
+  P4C5 ──WS Binary (opus)──> 本 ASR Adapter ──REST──> 阿里云 NLS ISI
+        <──WS JSON (text)─────                         ↓ 识别文字
                                                        ↓
-       <──WS JSON (text)───── mock_dsh_server (8765) <──┘
+        <──WS JSON (text)───── mock_dsh_server (8765) <┘
 """
 
 import argparse
 import asyncio
 import base64
+import hashlib
+import hmac
 import json
 import logging
 import os
 import struct
 import sys
 import time
-from collections import deque
+import urllib.parse
+import uuid
 from typing import Optional, Callable
 
 import numpy as np
 import websockets
 
-# 第三方库
+# 第三方库 (与 OMT 相同, 都需要 OPUS 解码)
 try:
     import opuslib  # type: ignore
     HAS_OPUS = True
@@ -52,38 +57,34 @@ except ImportError:
     HAS_OPUS = False
     logging.warning("opuslib 未安装, 将使用 mock decoder")
 
+# HTTP 客户端 (REST 调用阿里云)
 try:
-    import dashscope  # type: ignore
-    from dashscope.audio.asr import Recognition  # type: ignore
-    HAS_DASHSCOPE = True
+    import requests  # type: ignore
+    HAS_REQUESTS = True
 except ImportError:
-    HAS_DASHSCOPE = False
-    logging.warning("dashscope 未安装, 将使用 mock ASR")
+    HAS_REQUESTS = False
+    logging.warning("requests 未安装, 真实 ASR 模式需要: pip3 install requests")
 
 # ══════════════════════════════════════════════════════════
-# 配置
+# 常量 (与 OMT asr.js 完全一致)
 # ══════════════════════════════════════════════════════════
 
 SAMPLE_RATE = 16000
 CHANNELS = 1
-FRAME_SIZE_20MS = 320  # 16kHz × 0.020s
+FRAME_SIZE_20MS = 320  # 16000 * 0.020 = 320 samples per 20ms frame
 
-# VAD 参数 (与 OMT asr.js 一致)
-VAD_RMS_START = 80     # ~ -57 dBFS on 16-bit, 触发"开始说话"
-VAD_RMS_END = 50       # 触发"说话结束"
-VAD_END_HOLD_MS = 900  # 持续 900ms 静音才认为结束
-VAD_MAX_DURATION_MS = 20000  # 20s 硬截止
-VAD_MIN_DURATION_MS = 300    # 短于此忽略
-NO_FRAME_TIMEOUT_MS = 1000   # 1s 无新帧强制结束
-FRAME_MS = 20                # 每帧 20ms (16kHz × 320 samples)
-VAD_END_HOLD_FRAMES = VAD_END_HOLD_MS // FRAME_MS  # 45 帧 = 900ms
-VAD_MAX_DURATION_FRAMES = VAD_MAX_DURATION_MS // FRAME_MS  # 1000 帧 = 20s
-VAD_MIN_DURATION_FRAMES = VAD_MIN_DURATION_MS // FRAME_MS  # 15 帧 = 300ms
+# VAD 参数 (OMT 文中已注释: 16-bit PCM, RMS 阈值与静音超时)
+VAD_RMS_START = 80          # ~ -57 dBFS on 16-bit
+VAD_RMS_END = 50
+VAD_END_HOLD_MS = 900       # 900ms 静音后判定为说话结束
+VAD_MAX_DURATION_MS = 20000 # 20s 硬截止 (ISI one-shot limit ~60s)
+VAD_MIN_DURATION_MS = 300   # 短于此忽略
 
-# OPUS 帧格式 (与 ESP32 opus_encoder 配置一致)
-OPUS_BITRATE = 16000
-OPUS_COMPLEXITY = 5
-OPUS_FRAME_SIZE = FRAME_SIZE_20MS
+# 阿里云 NLS 配置
+NLS_ASR_URL = "https://nls-gateway.cn-shanghai.aliyuncs.com/stream/v1/asr"
+NLS_TOKEN_URL = "https://nls-meta.cn-shanghai.aliyuncs.com/"
+NLS_API_VERSION = "2019-02-28"
+NLS_REGION = "cn-shanghai"
 
 # 日志
 logging.basicConfig(
@@ -97,250 +98,326 @@ logger.propagate = True
 
 
 # ══════════════════════════════════════════════════════════
-# 工具函数
+# OMT 复刻: 阿里云 NLS Token (POP API signature v1)
 # ══════════════════════════════════════════════════════════
 
-def rms_int16(pcm: np.ndarray) -> float:
-    """计算 Int16 PCM 的 RMS (与 OMT asr.js rmsOfInt16 一致)"""
-    if len(pcm) == 0:
-        return 0.0
-    return float(np.sqrt(np.mean(pcm.astype(np.float64) ** 2)))
+def special_url_encode(s: str) -> str:
+    """阿里云 POP 签名特殊 URL 编码
+
+    与 RFC3986 相同, 除了:
+      space → %20 (不是 +)
+      *     → %2A
+      %7E   → ~    (反转义波浪号)
+    """
+    return (urllib.parse.quote(s, safe='')
+            .replace('+', '%20')
+            .replace('*', '%2A')
+            .replace('%7E', '~'))
 
 
-def rms_int16_buf(pcm: bytes) -> float:
-    """bytes → RMS"""
-    arr = np.frombuffer(pcm, dtype=np.int16)
-    return rms_int16(arr)
+def build_canonicalized_query(params: dict) -> str:
+    """构建规范化查询字符串 (按 key 字典序排序)"""
+    keys = sorted(params.keys())
+    pairs = [f"{special_url_encode(k)}={special_url_encode(str(v))}" for k, v in keys]
+    return "&".join(pairs)
 
 
-def pcm_to_wav(pcm_data: bytes, sample_rate: int = SAMPLE_RATE) -> bytes:
-    """PCM Int16 → WAV (用于调试/记录)"""
-    import io
-    import wave
-    buf = io.BytesIO()
-    with wave.open(buf, 'wb') as wf:
-        wf.setnchannels(1)
-        wf.setsampwidth(2)
-        wf.setframerate(sample_rate)
-        wf.writeframes(pcm_data)
-    return buf.getvalue()
+def compute_pop_signature(access_key_secret: str, params: dict) -> str:
+    """计算 POP API v1 签名 (HMAC-SHA1)"""
+    canonical = build_canonicalized_query(params)
+    string_to_sign = f"POST&{special_url_encode('/')}&{special_url_encode(canonical)}"
+    hmac_obj = hmac.new(
+        f"{access_key_secret}&".encode('utf-8'),
+        string_to_sign.encode('utf-8'),
+        hashlib.sha1
+    )
+    return base64.b64encode(hmac_obj.digest()).decode('utf-8')
+
+
+def get_nls_token(access_key_id: str, access_key_secret: str) -> dict:
+    """获取阿里云 NLS 访问 token (含过期时间)
+
+    返回: {"id": "token-string", "expire_at": unix-seconds}
+    """
+    public_params = {
+        "Format": "JSON",
+        "Version": NLS_API_VERSION,
+        "AccessKeyId": access_key_id,
+        "SignatureMethod": "HMAC-SHA1",
+        "Timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "SignatureVersion": "1.0",
+        "SignatureNonce": str(uuid.uuid4()),
+        "Action": "CreateToken",
+        "RegionId": NLS_REGION,
+    }
+    public_params["Signature"] = compute_pop_signature(access_key_secret, public_params)
+
+    resp = requests.post(NLS_TOKEN_URL, params=public_params, timeout=10)
+    data = resp.json()
+    if "Token" not in data:
+        raise Exception(f"GetToken failed: {data}")
+    return {
+        "id": data["Token"]["Id"],
+        "expire_at": int(data["Token"]["ExpireTime"]),
+    }
 
 
 # ══════════════════════════════════════════════════════════
-# OPUS 解码器
+# OMT 复刻: 阿里云 NLS 一句话识别 (ISI)
+# ══════════════════════════════════════════════════════════
+
+def call_isi_one_shot(pcm_bytes: bytes, token: str, appkey: str) -> str:
+    """调用阿里云 NLS ISI 一次性识别
+
+    Request:
+      POST https://nls-gateway.cn-shanghai.aliyuncs.com/stream/v1/asr
+        ?appkey=...&format=pcm&sample_rate=16000
+        &enable_punctuation_prediction=true
+        &enable_inverse_text_normalization=true
+      Headers:
+        X-NLS-Token: <token>
+        Content-Type: application/octet-stream
+      Body: raw PCM bytes (Int16 little-endian, 16kHz, mono)
+
+    Response (JSON):
+      { result: "识别文字", status: 20000000, message: "OK" }
+    """
+    params = {
+        "appkey": appkey,
+        "format": "pcm",
+        "sample_rate": str(SAMPLE_RATE),
+        "enable_punctuation_prediction": "true",
+        "enable_inverse_text_normalization": "true",
+    }
+    headers = {
+        "X-NLS-Token": token,
+        "Content-Type": "application/octet-stream",
+    }
+    resp = requests.post(
+        NLS_ASR_URL,
+        params=params,
+        headers=headers,
+        data=pcm_bytes,
+        timeout=15,
+    )
+    data = resp.json()
+    if data.get("status") != 20000000:
+        raise Exception(f"ISI error: status={data.get('status')}, "
+                        f"message={data.get('message')}")
+    return data.get("result", "")
+
+
+# ══════════════════════════════════════════════════════════
+# Token 缓存 (避免每次都调用 GetToken)
+# ══════════════════════════════════════════════════════════
+
+class TokenCache:
+    """阿里云 NLS Token 缓存 (提前 5 分钟过期, 与 OMT 一致)"""
+
+    def __init__(self, access_key_id: str, access_key_secret: str):
+        self.ak_id = access_key_id
+        self.ak_secret = access_key_secret
+        self.token = None
+        self.expire_at = 0
+
+    async def get(self) -> str:
+        now = int(time.time())
+        if self.token and now < self.expire_at - 300:
+            return self.token
+        logger.info("🔑 刷新阿里云 NLS token...")
+        # requests 是同步, 但调用很快, 用 asyncio.to_thread 不阻塞事件循环
+        result = await asyncio.to_thread(
+            get_nls_token, self.ak_id, self.ak_secret
+        )
+        self.token = result["id"]
+        self.expire_at = result["expire_at"]
+        logger.info(f"✅ token 有效期到 {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(self.expire_at))}")
+        return self.token
+
+
+# ══════════════════════════════════════════════════════════
+# OPUS 解码 (与 OMT opusscript 等价)
 # ══════════════════════════════════════════════════════════
 
 class OpusDecoder:
-    """opuslib 解码 OPUS → PCM Int16 (20ms 帧)"""
+    """OPUS 解码器 (libopus via opuslib)"""
 
     def __init__(self):
         if not HAS_OPUS:
-            raise RuntimeError("opuslib 未安装, 请运行: pip install opuslib")
+            raise RuntimeError("opuslib 未安装, 请运行: pip3 install opuslib")
         self.decoder = opuslib.Decoder(SAMPLE_RATE, CHANNELS)
 
-    def decode(self, opus_frame: bytes) -> bytes:
-        """解码单帧 OPUS → 640 bytes PCM (320 samples × 2 bytes)"""
-        return self.decoder.decode(opus_frame, OPUS_FRAME_SIZE)
+    def decode(self, opus_frame: bytes) -> np.ndarray:
+        """解码一个 OPUS 帧 (20ms @ 16kHz) → PCM Int16"""
+        pcm_bytes = self.decoder.decode(opus_frame, FRAME_SIZE_20MS)
+        return np.frombuffer(pcm_bytes, dtype=np.int16)
 
 
 class MockOpusDecoder:
-    """Mock 解码器 (无 opuslib 时) - 生成伪语音 PCM
+    """Mock 解码器 (无 opuslib 时)
 
     根据 opus_frame 第一字节决定输出:
       - 0x00 = 静默 (RMS=0)
       - 其他 = 1kHz 语音 (RMS~12000)
-
-    这样测试可以模拟 "静默 → 语音 → 静默" 完整会话
     """
 
     def __init__(self):
         self.frame_idx = 0
 
-    def decode(self, opus_frame: bytes) -> bytes:
+    def decode(self, opus_frame: bytes) -> np.ndarray:
         self.frame_idx += 1
         if opus_frame and opus_frame[0] == 0x00:
-            # 静默
-            return b'\x00\x00' * OPUS_FRAME_SIZE
+            return np.zeros(FRAME_SIZE_20MS, dtype=np.int16)
         else:
-            # 1kHz 正弦波
-            t = np.arange(OPUS_FRAME_SIZE, dtype=np.float32) + self.frame_idx * OPUS_FRAME_SIZE
+            t = np.arange(FRAME_SIZE_20MS, dtype=np.float32) + self.frame_idx * FRAME_SIZE_20MS
             wave = (np.sin(2 * np.pi * 1000 * t / SAMPLE_RATE) * 12000).astype(np.int16)
-            return wave.tobytes()
+            return wave
 
 
 # ══════════════════════════════════════════════════════════
-# ASR 引擎 (抽象基类)
+# ASR 引擎抽象 (OMT 直接调 ISI, 我们做一层抽象)
 # ══════════════════════════════════════════════════════════
 
 class ASREngine:
-    """ASR 引擎抽象基类"""
-
-    async def recognize(self, pcm_data: bytes) -> str:
-        """识别一段 PCM → 文字"""
+    """ASR 引擎基类"""
+    async def recognize(self, pcm_int16: np.ndarray) -> str:
         raise NotImplementedError
-
-    async def close(self):
-        pass
 
 
 class MockASREngine(ASREngine):
-    """Mock ASR (无 DashScope 时) - 返回带统计信息的伪识别文字"""
+    """Mock ASR (无 key 时)"""
 
     def __init__(self):
         self.call_count = 0
 
-    async def recognize(self, pcm_data: bytes) -> str:
+    async def recognize(self, pcm_int16: np.ndarray) -> str:
         self.call_count += 1
-        samples = len(pcm_data) // 2
-        duration_ms = samples * 1000 // SAMPLE_RATE
-        rms = rms_int16_buf(pcm_data)
-        # 伪识别: 根据 RMS 判断"是否有声", 决定返回有意义文字
-        if rms > VAD_RMS_START:
-            return (
-                f"[Mock-ASR #{self.call_count}] 识别到语音 "
-                f"({duration_ms}ms, RMS={rms:.0f})"
-            )
-        else:
-            return ""
+        duration_ms = len(pcm_int16) * 1000 / SAMPLE_RATE
+        rms = float(np.sqrt(np.mean(pcm_int16.astype(np.float32) ** 2)))
+        # 与 OMT test-asr-direct.js 输出格式一致
+        return f"[Mock-ASR #{self.call_count}] 识别到语音 ({int(duration_ms)}ms, RMS={int(rms)})"
 
 
-class DashScopeASREngine(ASREngine):
-    """阿里云 DashScope qwen3-asr-flash-realtime 一次性识别"""
+class NLSASREngine(ASREngine):
+    """阿里云 NLS 一句话识别 (ISI) - 与 OMT 完全一致"""
 
-    def __init__(self, api_key: str):
-        if not HAS_DASHSCOPE:
-            raise RuntimeError("dashscope 未安装")
-        dashscope.api_key = api_key
-        self.api_key = api_key
+    def __init__(self, access_key_id: str, access_key_secret: str, appkey: str):
+        self.token_cache = TokenCache(access_key_id, access_key_secret)
+        self.appkey = appkey
+        self.call_count = 0
 
-    async def recognize(self, pcm_data: bytes) -> str:
-        """调用 DashScope 同步 ASR API (POC: 一次性 REST 而非流式 WS)"""
-        try:
-            import dashscope
-            from dashscope.audio.asr import Recognition
-
-            # POC: 把 PCM 包装成临时 WAV 文件传给 DashScope
-            # 完整版: 用流式 WS API (`dashscope.audio.asr.Recognition`)
-            wav_data = pcm_to_wav(pcm_data)
-
-            # 写到临时文件
-            import tempfile
-            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
-                f.write(wav_data)
-                tmp_path = f.name
-
-            try:
-                response = Recognition.call(
-                    model="paraformer-realtime-v2",
-                    file_path=tmp_path,
-                    sample_rate=SAMPLE_RATE,
-                    format="wav",
-                    language="zh",
-                )
-                if response.status_code == 200:
-                    return response.output.get("text", "")
-                else:
-                    logger.error(f"DashScope error: {response.message}")
-                    return ""
-            finally:
-                os.unlink(tmp_path)
-        except Exception as e:
-            logger.exception(f"DashScope ASR failed: {e}")
-            return ""
+    async def recognize(self, pcm_int16: np.ndarray) -> str:
+        self.call_count += 1
+        token = await self.token_cache.get()
+        # Int16 little-endian (原生字节序)
+        pcm_bytes = pcm_int16.tobytes()
+        # OMT 也是直接 requests.post 同步调用, 用 to_thread 不阻塞事件循环
+        result = await asyncio.to_thread(
+            call_isi_one_shot, pcm_bytes, token, self.appkey
+        )
+        return result
 
 
 # ══════════════════════════════════════════════════════════
-# VAD + 会话累积
+# VAD 会话 (复刻 OMT asr.js 完整逻辑)
 # ══════════════════════════════════════════════════════════
 
 class VADSession:
-    """会话状态机: 累积 PCM → VAD 检测 → 触发 ASR"""
+    """会话状态机: 累积 PCM → VAD 检测 → 触发 ASR
+
+    完全复刻 OMT tab5-adapter/asr.js 的逻辑:
+      - rmsOfInt16() 整数平方根
+      - VAD_RMS_START / VAD_RMS_END 阈值
+      - VAD_END_HOLD_MS 静音超时
+      - VAD_MAX_DURATION_MS 硬截止
+    """
 
     def __init__(self, asr: ASREngine, on_text: Callable):
         self.asr = asr
-        self.on_text = on_text  # (text, meta) -> coroutine
+        self.on_text = on_text
 
-        self.pcm_chunks = []   # list[np.ndarray]
-        self.samples = 0
-        self.frames = 0        # 会话内帧计数 (用于 VAD)
-        self.speech_started = False
-        self.silence_started_at_frame: Optional[int] = None  # 静音开始的帧号
-        self.session_start_at: Optional[float] = None
-        self.recognizing = False
-
-    def reset(self):
-        """重置会话状态 (收到 audio start 帧时调用)"""
         self.pcm_chunks = []
         self.samples = 0
         self.frames = 0
         self.speech_started = False
-        self.silence_started_at_frame = None
-        self.session_start_at = None
+        self.silence_started_at: Optional[float] = None  # OMT 风格: 时间戳
+        self.session_start_at: Optional[float] = None
         self.recognizing = False
 
-    async def feed_opus_frame(self, opus_buf: bytes, decoder):
-        """收到一帧 OPUS → 解码 → 累积 → VAD 检测"""
+    def reset(self):
+        self.pcm_chunks = []
+        self.samples = 0
+        self.frames = 0
+        self.speech_started = False
+        self.silence_started_at = None
+        self.session_start_at = None
+
+    @staticmethod
+    def rms_of_int16(buf: np.ndarray) -> float:
+        """OMT 原文:
+            function rmsOfInt16(buf) {
+              let sumSq = 0;
+              for (let i = 0; i < buf.length; i++) {
+                const v = buf[i];
+                sumSq += v * v;
+              }
+              return Math.sqrt(sumSq / buf.length);
+            }
+        """
+        sum_sq = float(np.sum(buf.astype(np.float64) ** 2))
+        return (sum_sq / len(buf)) ** 0.5
+
+    async def feed(self, pcm_int16: np.ndarray, now: float):
+        """处理一个 20ms PCM 帧"""
         if self.recognizing:
-            return  # 上一段还在识别, 丢弃新帧
+            return  # OMT: 识别期间丢弃帧
 
-        try:
-            pcm_bytes = decoder.decode(opus_buf)
-        except Exception as e:
-            logger.error(f"OPUS decode failed: {e}")
-            return
-
-        pcm = np.frombuffer(pcm_bytes, dtype=np.int16)
-        rms = rms_int16(pcm)
-        now = time.time()
-
-        # 计数
-        if not hasattr(self, '_frame_idx'):
-            self._frame_idx = 0
-        self._frame_idx += 1
+        rms = self.rms_of_int16(pcm_int16)
+        if self.session_start_at is None:
+            self.session_start_at = now
 
         # 静音期: 等待 speech start
         if not self.speech_started:
             if rms > VAD_RMS_START:
-                logger.info(f"🎙  speech start (RMS={rms:.0f}, frame={self._frame_idx})")
+                logger.info(f"🎙  speech start (RMS={rms:.0f}, frame={self.frames})")
                 self.speech_started = True
-                self.silence_started_at_frame = None
-                self.session_start_at = now
+                self.silence_started_at = None
                 self.frames = 1
-                self.pcm_chunks.append(pcm)
-                self.samples += len(pcm)
+                self.pcm_chunks.append(pcm_int16)
+                self.samples += len(pcm_int16)
             else:
-                if self._frame_idx % 20 == 0:
-                    logger.info(f"   ⏳ 等待语音... (frame={self._frame_idx}, RMS={rms:.0f})")
+                if self.frames % 20 == 0:
+                    logger.info(f"   ⏳ 等待语音... (frame={self.frames}, RMS={rms:.0f})")
             return
 
         # 说话中: 累积
-        self.pcm_chunks.append(pcm)
-        self.samples += len(pcm)
+        self.pcm_chunks.append(pcm_int16)
+        self.samples += len(pcm_int16)
         self.frames += 1
+        duration_ms = self.samples * 1000 / SAMPLE_RATE
 
-        # 检测结束: 静音持续 >= VAD_END_HOLD_FRAMES 帧
+        # 检测结束: 静音持续 >= VAD_END_HOLD_MS (完全复刻 OMT)
         if rms < VAD_RMS_END:
-            if self.silence_started_at_frame is None:
-                self.silence_started_at_frame = self.frames
-                logger.info(f"   🤫 静音开始 (frame={self._frame_idx}, RMS={rms:.0f})")
+            if self.silence_started_at is None:
+                self.silence_started_at = now
+                logger.info(f"   🤫 静音开始 (frame={self.frames}, RMS={rms:.0f})")
             else:
-                silence_frames = self.frames - self.silence_started_at_frame
-                if silence_frames >= VAD_END_HOLD_FRAMES:
-                    logger.info(f"🤫 speech end (silence {silence_frames} frames = "
-                                f"{silence_frames*FRAME_MS}ms)")
+                silence_ms = (now - self.silence_started_at) * 1000
+                if silence_ms >= VAD_END_HOLD_MS:
+                    logger.info(f"🤫 speech end (silence {silence_ms:.0f}ms >= {VAD_END_HOLD_MS}ms)")
                     await self._finalize()
                     return
         else:
-            self.silence_started_at_frame = None
+            self.silence_started_at = None
 
-        # 硬截止: 超过 VAD_MAX_DURATION_FRAMES 强制结束
-        if self.frames >= VAD_MAX_DURATION_FRAMES:
-            logger.info(f"⏱  hard cutoff at {self.frames} frames")
+        # 硬截止: 超过 VAD_MAX_DURATION_MS
+        if duration_ms >= VAD_MAX_DURATION_MS:
+            logger.info(f"⏱  hard cutoff at {duration_ms:.0f}ms")
             await self._finalize()
             return
 
     async def _finalize(self):
-        """触发识别"""
+        """触发识别 (复刻 OMT recognizeAndEmit)"""
         if self.recognizing or not self.pcm_chunks:
             self.reset()
             return
@@ -348,138 +425,128 @@ class VADSession:
         self.recognizing = True
 
         # 拼接 PCM
-        pcm_full = np.concatenate(self.pcm_chunks).tobytes()
-        duration_ms = len(pcm_full) / 2 / SAMPLE_RATE * 1000
+        pcm_full = np.concatenate(self.pcm_chunks)
+        duration_ms = len(pcm_full) / SAMPLE_RATE * 1000
         frames_total = self.frames
         self.reset()
 
-        # 太短忽略
-        if frames_total < VAD_MIN_DURATION_FRAMES:
-            logger.info(f"⏭  skip too short ({frames_total} frames < {VAD_MIN_DURATION_FRAMES})")
+        # 太短忽略 (OMT: pcm.length < (SAMPLE_RATE * VAD_MIN_DURATION_MS) / 1000)
+        if duration_ms < VAD_MIN_DURATION_MS:
+            logger.info(f"⏭  skip too short ({duration_ms:.0f}ms)")
             self.recognizing = False
             return
 
         # 调 ASR
+        logger.info(f"🔄 ASR 识别中: {len(pcm_full)} samples ({duration_ms:.0f}ms)...")
         text = await self.asr.recognize(pcm_full)
         self.recognizing = False
 
         if text:
             logger.info(f"📝 ASR 识别: \"{text}\" ({duration_ms:.0f}ms, {frames_total} frames)")
             try:
-                await self.on_text(text, {"duration_ms": int(duration_ms), "frames": frames_total})
+                await self.on_text(text, {"duration_ms": int(duration_ms),
+                                          "frames": frames_total})
             except Exception as e:
                 logger.error(f"on_text callback failed: {e}")
 
-    async def force_end(self):
-        """外部触发结束 (audio 控制帧 action=end)"""
-        await self._finalize()
-
 
 # ══════════════════════════════════════════════════════════
-# WS 服务端
+# P4C5 ASR Adapter 服务端 (与 OMT 不同, 我们用 WS 而非 OPC UA)
 # ══════════════════════════════════════════════════════════
 
 class P4C5ASRServer:
-    """ASR Adapter WebSocket 服务端"""
+    """P4C5 ASR Adapter 服务端
+
+    接收 ESP32 WS Binary (opus) → VAD → ASR → 上行 user_input 到 DSH
+    复刻 OMT tab5-adapter/adapter.js 整体架构
+    """
 
     def __init__(self, port: int = 8766, asr_engine: ASREngine = None,
-                 upstream_url: Optional[str] = None):
+                 upstream_url: str = "ws://127.0.0.1:8765/ws"):
         self.port = port
         self.asr = asr_engine or MockASREngine()
-        self.upstream_url = upstream_url  # 上行到 mock_dsh_server 的地址
-        self.decoder = OpusDecoder() if HAS_OPUS else MockOpusDecoder()
-        self.sessions = {}  # ws -> (VADSession, upstream_ws)
+        self.upstream_url = upstream_url
+        self.upstream_ws: Optional[websockets.WebSocketClientProtocol] = None
 
-    async def handle_client(self, ws):
-        """处理单个 ESP32 客户端连接"""
+    async def connect_upstream(self):
+        """连接到上游 DSH (mock_dsh_server.py 或真实 DSH Adapter)"""
+        logger.info(f"  ↗  上行到 mock_dsh: {self.upstream_url}")
+        self.upstream_ws = await websockets.connect(self.upstream_url)
+        await self.upstream_ws.send(json.dumps({
+            "type": "client/hello",
+            "device_id": "p4c5_asr_adapter",
+        }))
+        logger.info(f"👋 hello: p4c5_asr_adapter")
+
+    async def on_text(self, text: str, meta: dict):
+        """VAD finalize → ASR 识别 → 上行 user_input 到 mock_dsh"""
+        if not self.upstream_ws:
+            logger.warning("upstream 未连接, 丢弃识别结果")
+            return
+        try:
+            await self.upstream_ws.send(json.dumps({
+                "type": "client/user_input",
+                "text": text,
+                "duration_ms": meta.get("duration_ms", 0),
+            }))
+            logger.info(f"💬 上行 user_input: \"{text[:50]}\"")
+        except Exception as e:
+            logger.error(f"upstream 发送失败: {e}")
+
+    async def handle_p4c5_client(self, ws):
+        """处理 ESP32 P4C5 上行 OPUS 音频"""
         remote = ws.remote_address
         logger.info(f"✅ 新连接: {remote}")
 
-        # 上行到 mock_dsh_server (如果配置了)
-        upstream_ws = None
-        if self.upstream_url:
-            try:
-                upstream_ws = await websockets.connect(self.upstream_url)
-                logger.info(f"  ↗  上行到 mock_dsh: {self.upstream_url}")
-            except Exception as e:
-                logger.error(f"上行连接失败: {e}")
+        # 准备 OPUS 解码器
+        decoder = OpusDecoder() if HAS_OPUS else MockOpusDecoder()
+        vad = VADSession(self.asr, self.on_text)
 
-        session = VADSession(self.asr, lambda t, m: self.on_text(upstream_ws, t, m))
-        self.sessions[ws] = (session, upstream_ws)
+        # 上行帧计数
+        frame_count = 0
 
         try:
-            async for msg in ws:
-                # 区分文本/二进制
-                if isinstance(msg, bytes):
-                    # OPUS 帧
-                    if not hasattr(self, '_binary_count'):
-                        self._binary_count = 0
-                    self._binary_count += 1
-                    if self._binary_count <= 5 or self._binary_count % 50 == 0:
-                        logger.info(f"📦 binary msg #{self._binary_count} len={len(msg)}")
-                    await session.feed_opus_frame(msg, self.decoder)
-                else:
-                    # JSON 控制帧 (audio start/end 等)
+            async for message in ws:
+                # 文本帧: 控制命令
+                if isinstance(message, str):
                     try:
-                        data = json.loads(msg)
-                        await self._handle_control(upstream_ws, session, data)
+                        data = json.loads(message)
+                        if data.get("type") == "client/hello":
+                            logger.info(f"👋 hello: {data.get('device_id')}")
                     except json.JSONDecodeError:
-                        logger.warning(f"❌ JSON 解析失败: {msg[:100]}")
+                        pass
+                    continue
+
+                # 二进制帧: OPUS 音频
+                if not isinstance(message, bytes) or len(message) == 0:
+                    continue
+
+                frame_count += 1
+                if frame_count % 50 == 1:
+                    logger.info(f"📦 binary msg #{frame_count} len={len(message)}")
+
+                try:
+                    pcm = decoder.decode(message)
+                    await vad.feed(pcm, time.time())
+                except Exception as e:
+                    logger.warning(f"frame {frame_count} 处理失败: {e}")
 
         except websockets.ConnectionClosed:
             pass
         finally:
-            try:
-                if upstream_ws:
-                    await upstream_ws.close()
-            except Exception:
-                pass
-            self.sessions.pop(ws, None)
             logger.info(f"❌ 断开: {remote}")
 
-    async def _handle_control(self, upstream_ws, session: VADSession, data: dict):
-        """处理 JSON 控制帧"""
-        ftype = data.get("type", "")
-        if ftype == "audio":
-            action = data.get("action", "")
-            if action == "start":
-                logger.info("▶  audio start")
-                session.reset()
-            elif action == "end":
-                logger.info("⏹  audio end")
-                await session.force_end()
-        elif ftype == "client/hello":
-            logger.info(f"👋 hello: {data.get('device_id', '?')}")
-
-    async def on_text(self, upstream_ws, text: str, meta: dict):
-        """ASR 识别文字 → 上行到 mock_dsh_server"""
-        if upstream_ws is None:
-            logger.info(f"💬 [no upstream] text: \"{text}\"")
-            return
-
-        try:
-            # 包装成 DSH 协议帧
-            frame = {
-                "type": "client/user_input",
-                "text": text,
-                "source": "p4c5_asr",
-                "duration_ms": meta.get("duration_ms", 0),
-                "session_id": "asr_session",
-            }
-            await upstream_ws.send(json.dumps(frame))
-            logger.info(f"💬 上行 user_input: \"{text[:50]}\"")
-        except Exception as e:
-            logger.error(f"上行发送失败: {e}")
-
     async def run(self, host: str = "0.0.0.0"):
-        """启动 WS 服务"""
-        logger.info(f"🚀 P4C5 ASR Adapter 启动")
+        """启动 ASR Adapter 服务"""
+        logger.info(f"🚀 P4C5 ASR Adapter 启动 (OMT 同等配置)")
         logger.info(f"   监听: ws://{host}:{self.port}")
         logger.info(f"   ASR 引擎: {type(self.asr).__name__}")
         logger.info(f"   OPUS 解码: {'opuslib' if HAS_OPUS else 'mock'}")
-        logger.info(f"   上行 upstream: {self.upstream_url or 'NONE'}")
+        logger.info(f"   上行 upstream: {self.upstream_url}")
 
-        async with websockets.serve(self.handle_client, host, self.port):
+        await self.connect_upstream()
+
+        async with websockets.serve(self.handle_p4c5_client, host, self.port):
             await asyncio.Future()  # run forever
 
 
@@ -488,24 +555,36 @@ class P4C5ASRServer:
 # ══════════════════════════════════════════════════════════
 
 def main():
-    parser = argparse.ArgumentParser(description="P4C5 ASR Adapter")
+    parser = argparse.ArgumentParser(description="P4C5 ASR Adapter (OMT 同等配置: 阿里云 NLS ISI)")
     parser.add_argument("--port", type=int, default=8766,
-                        help="监听端口 (default: 8766)")
+                        help="ESP32 监听端口 (default: 8766)")
     parser.add_argument("--host", default="0.0.0.0",
                         help="监听地址 (default: 0.0.0.0)")
+    parser.add_argument("--upstream", default="ws://127.0.0.1:8765/ws",
+                        help="DSH upstream 地址")
     parser.add_argument("--mock", action="store_true",
-                        help="Mock ASR 模式 (无 DashScope 也能跑)")
-    parser.add_argument("--upstream", default=None,
-                        help="上行到 mock_dsh_server 地址 (例: ws://127.0.0.1:8765/ws)")
+                        help="Mock ASR 模式 (无需阿里云 key)")
     args = parser.parse_args()
 
-    # 选择 ASR 引擎
-    if args.mock or not os.environ.get("DASHSCOPE_API_KEY"):
+    # 选择 ASR 引擎 (与 OMT asr.js 的"无 key 报错"对比, 我们加 mock 模式)
+    if args.mock or not (os.environ.get("ALIYUN_ACCESS_KEY_ID")
+                         and os.environ.get("ALIYUN_ACCESS_KEY_SECRET")
+                         and os.environ.get("ALIYUN_NLS_APPKEY")):
+        logger.warning("⚠  使用 Mock ASR 模式 (无 key 或显式 --mock)")
         asr = MockASREngine()
     else:
-        asr = DashScopeASREngine(os.environ["DASHSCOPE_API_KEY"])
+        logger.info("✅ 使用 阿里云 NLS ISI 真实 ASR")
+        asr = NLSASREngine(
+            access_key_id=os.environ["ALIYUN_ACCESS_KEY_ID"],
+            access_key_secret=os.environ["ALIYUN_ACCESS_KEY_SECRET"],
+            appkey=os.environ["ALIYUN_NLS_APPKEY"],
+        )
 
-    server = P4C5ASRServer(port=args.port, asr_engine=asr, upstream_url=args.upstream)
+    server = P4C5ASRServer(
+        port=args.port,
+        asr_engine=asr,
+        upstream_url=args.upstream,
+    )
     try:
         asyncio.run(server.run(args.host))
     except KeyboardInterrupt:

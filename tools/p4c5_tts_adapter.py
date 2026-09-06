@@ -1,37 +1,34 @@
 #!/usr/bin/env python3
 """
-P4C5 TTS Adapter — Mac 端语音合成代理
+P4C5 TTS Adapter — Mac 端语音合成代理 (阿里百炼 DashScope CosyVoice)
 
-接收 mock_dsh_server (或真实 DSH Adapter) 下行的 assistant_text 帧
-  → 调用火山豆包双向流式 TTS (WebSocket)
+接收 mock_dsh_server.py (或其他 DSH Adapter) 下行的 assistant_text 帧
+  → 调用阿里百炼 DashScope CosyVoice 语音合成 (REST)
   → 接收 PCM 24kHz 音频
   → 下行 WS Binary 给 ESP32-P4C5 ES8311 DAC 播放
 
-设计参考: subagent 249bae11 火山 TTS 调研
-  - URL: wss://openspeech.bytedance.com/api/v3/tts/bidirection
-  - 4 字节协议头: (pv << 4) | hdr_size, (msg_type << 4) | flags, ...
-  - 事件流程: StartSession(100) → TaskRequest(200) → FinishSession(102)
-  - 服务端音频: TTSResponse(352) → SessionFinished(152)
+设计参考:
+  - 阿里百炼 TTS: https://dashscope.aliyuncs.com/api/v1/services/audio/tts/generation
+  - CosyVoice 模型: cosyvoice-v1 (支持 49+ 中文音色)
+  - 采样率 24kHz 与 ESP32 ES8311 默认一致
 
-POC 简化:
-  - Mock TTS 模式 (无需火山 App-Key/Access-Key)
-  - 生成静默 PCM + beep 提示音
-  - 监听 mock_dsh_server 下行帧 (默认 ws://127.0.0.1:8765/ws)
-  - 下行到 ESP32 (默认 ws://127.0.0.1:8767)
-
-完整版 (待写):
-  - 火山豆包真实接入 (需 X-Api-App-Key / X-Api-Access-Key / X-Api-Resource-Id)
-  - 双向流式 (边合成边下发, 降低首音延迟)
+OMT 项目没有 TTS 实现, 这是 P4C5 扩展。
+OMT 仅做 ASR (阿里云 NLS ISI), 用户需求是双向语音对话故加 TTS。
 
 使用方法:
-  # Mock 模式
+  # Mock 模式 (不需要 key)
   python3 tools/p4c5_tts_adapter.py --mock
 
-  # 真实火山 TTS (需环境变量)
-  export VOLC_APP_KEY=xxx
-  export VOLC_ACCESS_KEY=xxx
-  export VOLC_RESOURCE_ID=volc.service_type.10029
-  python3 tools/p4c5_tts_adapter.py
+  # 真实 TTS 模式 (需要阿里百炼 API key)
+  export DASHSCOPE_API_KEY=sk-xxx
+  python3 tools/p4c5_tts_adapter.py --port 8767
+
+架构:
+  mock_dsh_server (8765) ──WS JSON (assistant_text)──> 本 TTS Adapter
+                                                          ↓ REST
+                                                       阿里百炼 CosyVoice
+                                                          ↓ PCM 24kHz
+  ESP32 (8767) ──WS Binary (PCM 下行)─────────────────────────┘
 """
 
 import argparse
@@ -40,41 +37,38 @@ import base64
 import json
 import logging
 import os
-import struct
+import re
 import sys
 import time
-from typing import Optional
+from typing import Optional, Callable
 
 import numpy as np
 import websockets
 
-# 第三方库
+# HTTP 客户端 (调用阿里百炼 REST)
 try:
-    import websockets.client  # type: ignore
-    HAS_WS = True
+    import requests  # type: ignore
+    HAS_REQUESTS = True
 except ImportError:
-    HAS_WS = False
-    logging.warning("websockets 未安装")
+    HAS_REQUESTS = False
+    logging.warning("requests 未安装, 真实 TTS 需要: pip3 install requests")
 
 # ══════════════════════════════════════════════════════════
 # 配置
 # ══════════════════════════════════════════════════════════
 
-# 火山豆包 TTS
-TTS_SAMPLE_RATE = 24000  # 24kHz (与 ESP32 ES8311 一致)
+# 阿里百炼 TTS
+DASHSCOPE_TTS_URL = "https://dashscope.aliyuncs.com/api/v1/services/audio/tts/generation"
+DASHSCOPE_DEFAULT_MODEL = "cosyvoice-v1"
+DASHSCOPE_DEFAULT_VOICE = "longxiaochun"  # 龙小淳, 中文女声, 阿里百炼默认
+
+# 音频参数 (与 ESP32 ES8311 24kHz 默认匹配)
+TTS_SAMPLE_RATE = 24000
 TTS_CHANNELS = 1
 TTS_BITS_PER_SAMPLE = 16
-TTS_FRAME_MS = 60        # 60ms / 帧 (小智配置)
-
-# 火山豆包协议
-VOLC_TTS_URL = "wss://openspeech.bytedance.com/api/v3/tts/bidirection"
-PROTOCOL_VERSION = 0b0001  # v1
-HEADER_SIZE = 0b0001       # 1 个 4 字节
-MSG_TYPE_FULL_CLIENT = 0b0001   # full-client request
-MSG_TYPE_AUDIO_ONLY = 0b0010   # audio-only server response
-SERIALIZATION_JSON = 0b0001
-SERIALIZATION_RAW = 0b0000
-COMPRESSION_NONE = 0b0000
+TTS_FRAME_MS = 60                     # 60ms / 帧 (与 ESP32 tts_player 队列一致)
+TTS_FRAME_SAMPLES = TTS_SAMPLE_RATE * TTS_FRAME_MS // 1000  # 1440 samples
+TTS_FRAME_BYTES = TTS_FRAME_SAMPLES * TTS_BITS_PER_SAMPLE // 8  # 2880 bytes
 
 # 日志
 logging.basicConfig(
@@ -88,49 +82,13 @@ logger.propagate = True
 
 
 # ══════════════════════════════════════════════════════════
-# 火山豆包协议头 (4 字节位打包)
-# ══════════════════════════════════════════════════════════
-
-def make_volc_header(msg_type: int, flags: int = 0,
-                     serialization: int = SERIALIZATION_JSON,
-                     compression: int = COMPRESSION_NONE) -> bytes:
-    """生成火山豆包 4 字节协议头
-
-    byte0: (protocol_version << 4) | header_size
-    byte1: (message_type << 4) | flags
-    byte2: (serialization << 4) | compression
-    byte3: reserved (0)
-    """
-    b0 = (PROTOCOL_VERSION << 4) | HEADER_SIZE
-    b1 = (msg_type << 4) | (flags & 0x0F)
-    b2 = (serialization << 4) | (compression & 0x0F)
-    return bytes([b0, b1, b2, 0x00])
-
-
-def parse_volc_header(data: bytes) -> dict:
-    """解析火山豆包协议头"""
-    if len(data) < 4:
-        return {}
-    b0, b1, b2, b3 = data[0], data[1], data[2], data[3]
-    return {
-        'protocol_version': (b0 >> 4) & 0x0F,
-        'header_size': b0 & 0x0F,
-        'message_type': (b1 >> 4) & 0x0F,
-        'flags': b1 & 0x0F,
-        'serialization': (b2 >> 4) & 0x0F,
-        'compression': b2 & 0x0F,
-        'reserved': b3,
-    }
-
-
-# ══════════════════════════════════════════════════════════
 # TTS 引擎抽象
 # ══════════════════════════════════════════════════════════
 
 class TTSEngine:
-    """TTS 引擎抽象基类"""
+    """TTS 引擎基类"""
 
-    async def synthesize(self, text: str, on_audio_chunk) -> bool:
+    async def synthesize(self, text: str, on_audio_chunk: Callable) -> bool:
         """合成文字 → 音频流 (回调下发)
 
         on_audio_chunk: async callback(pcm_bytes) -> None
@@ -140,161 +98,158 @@ class TTSEngine:
 
 
 class MockTTSEngine(TTSEngine):
-    """Mock TTS - 生成静默 + beep 音, 不需要火山 API key"""
+    """Mock TTS (无 key 时)
+
+    生成 800Hz 正弦波代替语音, 用于联调测试
+    """
 
     def __init__(self):
         self.call_count = 0
 
-    async def synthesize(self, text: str, on_audio_chunk) -> bool:
-        """生成模拟 TTS 音频"""
+    async def synthesize(self, text: str, on_audio_chunk: Callable) -> bool:
         self.call_count += 1
         logger.info(f"🔊 [mock-tts #{self.call_count}] 合成: \"{text[:50]}\"")
 
-        # 60ms @ 24kHz = 1440 samples = 2880 bytes
-        FRAME_SAMPLES = TTS_SAMPLE_RATE * TTS_FRAME_MS // 1000
-
-        # 生成 1 秒音频 = 17 帧 @ 60ms
+        # 生成 1 秒音频 = ~17 帧 @ 60ms
         n_frames = 17
         for i in range(n_frames):
-            # beep 音: 800Hz 正弦波, 模拟语音提示
-            t = np.arange(FRAME_SAMPLES, dtype=np.float32) + i * FRAME_SAMPLES
+            t = np.arange(TTS_FRAME_SAMPLES, dtype=np.float32) + i * TTS_FRAME_SAMPLES
+            # beep 音: 800Hz 正弦波
             wave = (np.sin(2 * np.pi * 800 * t / TTS_SAMPLE_RATE) * 4000).astype(np.int16)
             pcm = wave.tobytes()
             await on_audio_chunk(pcm)
-            await asyncio.sleep(TTS_FRAME_MS / 1000 * 0.5)  # 加速 mock 下行
+            await asyncio.sleep(0.01)  # 模拟网络延迟
 
         return True
 
 
-class VolcTTSEngine(TTSEngine):
-    """火山豆包双向流式 TTS
+class CosyVoiceTTSEngine(TTSEngine):
+    """阿里百炼 DashScope CosyVoice 语音合成
 
-    协议流程:
-      1. StartSession (100): 发送 session 配置
-      2. TaskRequest (200, 可多次): 发送文本片段
-      3. FinishSession (102): 结束会话
-      4. 接收 TTSResponse (352) 音频数据
-      5. 接收 SessionFinished (152)
+    REST POST:
+      POST https://dashscope.aliyuncs.com/api/v1/services/audio/tts/generation
+      Headers:
+        Authorization: Bearer ${DASHSCOPE_API_KEY}
+        Content-Type: application/json
+      Body:
+        {
+          "model": "cosyvoice-v1",
+          "voice": "longxiaochun",
+          "input": {"text": "..."},
+          "parameters": {"format": "pcm", "sample_rate": 24000}
+        }
+
+    Response:
+      {
+        "output": {
+          "audio": {
+            "data": "<base64 PCM bytes>",
+            "sample_rate": 24000
+          }
+        },
+        "usage": {...}
+      }
     """
 
-    def __init__(self, app_key: str, access_key: str, resource_id: str,
-                 speaker: str = "BV001_streaming"):
-        self.app_key = app_key
-        self.access_key = access_key
-        self.resource_id = resource_id
-        self.speaker = speaker
+    def __init__(self, api_key: str, model: str = DASHSCOPE_DEFAULT_MODEL,
+                 voice: str = DASHSCOPE_DEFAULT_VOICE,
+                 sample_rate: int = TTS_SAMPLE_RATE):
+        self.api_key = api_key
+        self.model = model
+        self.voice = voice
+        self.sample_rate = sample_rate
+        self.call_count = 0
 
-    async def synthesize(self, text: str, on_audio_chunk) -> bool:
-        """调用火山豆包双向流式 TTS"""
+    async def synthesize(self, text: str, on_audio_chunk: Callable) -> bool:
+        self.call_count += 1
+
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+        body = {
+            "model": self.model,
+            "voice": self.voice,
+            "input": {"text": text},
+            "parameters": {
+                "format": "pcm",
+                "sample_rate": self.sample_rate,
+            },
+        }
+
+        # 同步 requests 调用, 用 to_thread 不阻塞事件循环
         try:
-            async with websockets.connect(
-                VOLC_TTS_URL,
-                extra_headers={
-                    "X-Api-App-Key": self.app_key,
-                    "X-Api-Access-Key": self.access_key,
-                    "X-Api-Resource-Id": self.resource_id,
-                    "X-Api-Connect-Id": f"p4c5_{int(time.time()*1000)}",
-                },
-            ) as ws:
-                # 1. StartSession
-                session_config = {
-                    "user": {"uid": "p4c5_user"},
-                    "namespace": "BidirectionalTTS",
-                    "req_params": {
-                        "speaker": self.speaker,
-                        "audio_params": {
-                            "format": "pcm",
-                            "sample_rate": TTS_SAMPLE_RATE,
-                            "speech_rate": 0,
-                            "loudness_rate": 0,
-                        },
-                        "additions": json.dumps({
-                            "post_process": {"pitch": 0},
-                            "aigc_metadata": {},
-                            "cache_config": {},
-                        }),
-                    },
-                }
-                header = make_volc_header(MSG_TYPE_FULL_CLIENT, flags=0b0100)
-                payload = json.dumps(session_config).encode("utf-8")
-                await ws.send(header + payload)
-                logger.info("📤 StartSession 已发送")
-
-                # 2. TaskRequest (发送文本)
-                task_request = {
-                    "event": 200,
-                    "namespace": "BidirectionalTTS",
-                    "req_params": {},
-                    "text": text,
-                }
-                header = make_volc_header(MSG_TYPE_FULL_CLIENT, flags=0b0100)
-                payload = json.dumps(task_request).encode("utf-8")
-                await ws.send(header + payload)
-                logger.info(f"📤 TaskRequest 已发送: \"{text[:30]}\"")
-
-                # 3. FinishSession
-                finish = {"event": 102}
-                header = make_volc_header(MSG_TYPE_FULL_CLIENT, flags=0b0100)
-                payload = json.dumps(finish).encode("utf-8")
-                await ws.send(header + payload)
-                logger.info("📤 FinishSession 已发送")
-
-                # 4. 接收响应 (TTSResponse 352 + SessionFinished 152)
-                while True:
-                    try:
-                        msg = await asyncio.wait_for(ws.recv(), timeout=10.0)
-                    except asyncio.TimeoutError:
-                        logger.warning("⏱ 火山 TTS 响应超时")
-                        break
-                    if not msg or len(msg) < 4:
-                        break
-                    h = parse_volc_header(msg)
-                    if h.get('message_type') == 0b1010:  # SessionFinished (10)
-                        logger.info("✅ SessionFinished 收到")
-                        break
-                    # TTSResponse 音频数据 (msg_type=0b0011 = 3?)
-                    # 火山实际定义: 352 = 0x160 (msg_type=1, flags=6?)
-                    # POC: 直接把 payload 当 PCM
-                    audio_payload = msg[4:]  # 跳过 4 字节头
-                    if audio_payload and len(audio_payload) > 100:
-                        await on_audio_chunk(audio_payload)
-
-                return True
-
+            resp = await asyncio.to_thread(
+                requests.post,
+                DASHSCOPE_TTS_URL,
+                headers=headers,
+                json=body,
+                timeout=30,
+            )
         except Exception as e:
-            logger.exception(f"火山 TTS 调用失败: {e}")
+            logger.exception(f"DashScope TTS 请求失败: {e}")
             return False
+
+        if resp.status_code != 200:
+            logger.error(f"DashScope TTS 返回 {resp.status_code}: {resp.text[:200]}")
+            return False
+
+        try:
+            data = resp.json()
+            audio_b64 = data["output"]["audio"]["data"]
+            audio_bytes = base64.b64decode(audio_b64)
+        except (KeyError, ValueError) as e:
+            logger.exception(f"DashScope 响应解析失败: {e}")
+            return False
+
+        # 按帧切分下发 (每帧 60ms = 2880 bytes @ 24kHz mono Int16)
+        # 实际响应可能不是整数帧, 用 padding 补齐最后一帧
+        n_frames = len(audio_bytes) // TTS_FRAME_BYTES
+        remainder = len(audio_bytes) % TTS_FRAME_BYTES
+        logger.info(f"🔊 [cosyvoice #{self.call_count}] 合成 {len(audio_bytes)} bytes "
+                    f"= {n_frames} 帧 + {remainder} bytes 残余")
+
+        for i in range(n_frames):
+            chunk = audio_bytes[i * TTS_FRAME_BYTES:(i + 1) * TTS_FRAME_BYTES]
+            await on_audio_chunk(chunk)
+            await asyncio.sleep(TTS_FRAME_MS / 1000 * 0.5)  # 加速下行
+
+        # 残余补 0 凑满一帧
+        if remainder > 0:
+            tail = audio_bytes[n_frames * TTS_FRAME_BYTES:]
+            tail += b'\x00' * (TTS_FRAME_BYTES - remainder)
+            await on_audio_chunk(tail)
+
+        return True
 
 
 # ══════════════════════════════════════════════════════════
-# 监听下行帧 (mock_dsh_server → TTS Adapter)
+# 监听下行帧 (mock_dsh → TTS Adapter)
 # ══════════════════════════════════════════════════════════
 
 class DSHListener:
     """监听 mock_dsh_server 下行的 assistant_text 帧"""
 
-    def __init__(self, url: str, on_text):
+    def __init__(self, url: str, on_text: Callable):
         self.url = url
-        self.on_text = on_text  # async callback(text: str)
+        self.on_text = on_text
         self.running = False
 
     async def run(self):
-        """持续监听 mock_dsh_server + 主动触发 user_input 测试"""
         self.running = True
         backoff = 1.0
         while self.running:
             try:
                 logger.info(f"🔗 连接 DSH: {self.url}")
                 async with websockets.connect(self.url) as ws:
-                    # HELLO (作为 ESP32 客户端)
                     await ws.send(json.dumps({
                         "type": "client/hello",
                         "device_id": "p4c5_tts_adapter",
                         "caps": ["tts", "audio"],
                     }))
                     logger.info("👋 HELLO 已发送")
-
                     backoff = 1.0
+
                     async for msg in ws:
                         if isinstance(msg, bytes):
                             continue
@@ -314,10 +269,11 @@ class DSHListener:
                         elif ftype == "assistant_done":
                             logger.info("✅ assistant_done")
                         elif ftype == "session_state":
-                            if data.get("state") == "idle":
-                                # ★ 连接建立后, 主动发送 user_input 触发 mock LLM 回复
-                                # (生产环境由 P4C5 端发送, 这里仅用于测试)
-                                logger.info("▶  session idle → 发送 user_input 触发 LLM")
+                            if (data.get("state") == "idle"
+                                    and not getattr(self, "_test_triggered", False)):
+                                # 首次连接后, 主动触发一次 user_input 用于自测
+                                self._test_triggered = True
+                                logger.info("▶  session idle → 发送 user_input 触发 LLM (测试)")
                                 await asyncio.sleep(0.5)
                                 await ws.send(json.dumps({
                                     "type": "client/user_input",
@@ -325,7 +281,8 @@ class DSHListener:
                                     "session_id": data.get("session_id", ""),
                                 }))
 
-            except (ConnectionRefusedError, OSError, websockets.ConnectionClosed) as e:
+            except (ConnectionRefusedError, OSError,
+                    websockets.ConnectionClosed) as e:
                 logger.warning(f"DSH 连接断开: {e}, {backoff}s 后重连")
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, 30.0)
@@ -346,8 +303,7 @@ class P4C5TTSServer:
         self.port = port
         self.tts = tts_engine or MockTTSEngine()
         self.dsh_url = dsh_url
-        self.clients = set()  # 已连接的 ESP32 客户端
-        self.pending_texts = []  # 待合成的文本队列
+        self.clients = set()
         self.synth_lock = asyncio.Lock()
 
     async def handle_esp32_client(self, ws):
@@ -356,8 +312,7 @@ class P4C5TTSServer:
         logger.info(f"✅ ESP32 连接: {remote}")
         self.clients.add(ws)
         try:
-            async for msg in ws:
-                # 简单保持连接 (可加心跳/控制帧)
+            async for _msg in ws:
                 pass
         except websockets.ConnectionClosed:
             pass
@@ -371,7 +326,6 @@ class P4C5TTSServer:
 
         async with self.synth_lock:
             async def on_chunk(pcm: bytes):
-                """TTS 引擎回调: 下行 PCM 给所有 ESP32 客户端"""
                 if not self.clients:
                     logger.warning("⚠  无 ESP32 客户端, 丢弃音频")
                     return
@@ -385,19 +339,16 @@ class P4C5TTSServer:
             logger.info(f"✅ [tts] 合成完成: \"{text[:50]}\"")
 
     async def run(self, host: str = "0.0.0.0"):
-        """启动 WS 服务 + DSH 监听"""
-        logger.info(f"🚀 P4C5 TTS Adapter 启动")
+        logger.info(f"🚀 P4C5 TTS Adapter 启动 (阿里百炼 CosyVoice)")
         logger.info(f"   ESP32 监听: ws://{host}:{self.port}")
         logger.info(f"   TTS 引擎: {type(self.tts).__name__}")
         logger.info(f"   DSH 上游: {self.dsh_url}")
 
-        # 启动 DSH 监听任务
         listener = DSHListener(self.dsh_url, self.on_dsh_text)
         asyncio.create_task(listener.run())
 
-        # 启动 ESP32 服务端
         async with websockets.serve(self.handle_esp32_client, host, self.port):
-            await asyncio.Future()  # run forever
+            await asyncio.Future()
 
 
 # ══════════════════════════════════════════════════════════
@@ -405,7 +356,7 @@ class P4C5TTSServer:
 # ══════════════════════════════════════════════════════════
 
 def main():
-    parser = argparse.ArgumentParser(description="P4C5 TTS Adapter")
+    parser = argparse.ArgumentParser(description="P4C5 TTS Adapter (阿里百炼 CosyVoice)")
     parser.add_argument("--port", type=int, default=8767,
                         help="ESP32 监听端口 (default: 8767)")
     parser.add_argument("--host", default="0.0.0.0",
@@ -413,19 +364,22 @@ def main():
     parser.add_argument("--dsh-url", default="ws://127.0.0.1:8765/ws",
                         help="DSH 上游地址")
     parser.add_argument("--mock", action="store_true",
-                        help="Mock TTS 模式 (无需火山 API key)")
+                        help="Mock TTS 模式 (无需 API key)")
+    parser.add_argument("--voice", default=DASHSCOPE_DEFAULT_VOICE,
+                        help=f"语音角色 (default: {DASHSCOPE_DEFAULT_VOICE})")
+    parser.add_argument("--model", default=DASHSCOPE_DEFAULT_MODEL,
+                        help=f"模型 (default: {DASHSCOPE_DEFAULT_MODEL})")
     args = parser.parse_args()
 
-    # 选择 TTS 引擎
-    if args.mock or not (os.environ.get("VOLC_APP_KEY")
-                         and os.environ.get("VOLC_ACCESS_KEY")):
+    if args.mock or not os.environ.get("DASHSCOPE_API_KEY"):
+        logger.warning("⚠  使用 Mock TTS 模式 (无 key 或显式 --mock)")
         tts = MockTTSEngine()
     else:
-        tts = VolcTTSEngine(
-            app_key=os.environ["VOLC_APP_KEY"],
-            access_key=os.environ["VOLC_ACCESS_KEY"],
-            resource_id=os.environ.get("VOLC_RESOURCE_ID",
-                                       "volc.service_type.10029"),
+        logger.info("✅ 使用 阿里百炼 CosyVoice 真实 TTS")
+        tts = CosyVoiceTTSEngine(
+            api_key=os.environ["DASHSCOPE_API_KEY"],
+            model=args.model,
+            voice=args.voice,
         )
 
     server = P4C5TTSServer(
