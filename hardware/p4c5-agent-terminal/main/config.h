@@ -68,7 +68,7 @@
 #define P4C5_4G_RX_GPIO           GPIO_NUM_52
 #define P4C5_4G_PWR_GPIO          GPIO_NUM_4
 #define P4C5_4G_DTR_GPIO            GPIO_NUM_51
-#define P4C5_4G_BAUD_RATE         115200
+#define P4C5_4G_BAUD_RATE         921600
 
 /* ── IMU (LSM6DS3TR-C) ── */
 #define P4C5_IMU_I2C_ADDR         0x6A

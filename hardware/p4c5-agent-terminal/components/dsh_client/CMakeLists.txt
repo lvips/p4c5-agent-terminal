@@ -5,6 +5,7 @@ idf_component_register(
         "dsh_client_ws.c"
         "dsh_client_frames.c"
         "dsh_client_heartbeat.c"
+        "dsh_client_transport_ws.c"
     INCLUDE_DIRS "."
     REQUIRES
         esp_websocket_client

@@ -25,6 +25,7 @@
 #include "cJSON.h"
 #include "esp_err.h"
 #include "esp_netif.h"
+#include "dsh_client_transport.h"
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -233,6 +234,20 @@ esp_err_t dsh_client_attach_netif(esp_netif_t *netif);
  * 会自动查询并携带这些数据。不注册则 battery=-1, rssi=0。
  */
 esp_err_t dsh_client_set_status_provider(dsh_client_status_cb_t cb, void *user_data);
+
+/* ══════════════════════════════════════════════════════════
+ * 传输层切换（1 个）
+ * ══════════════════════════════════════════════════════════ */
+
+/**
+ * 设置自定义传输层
+ *
+ * 必须在 dsh_client_init() 之前调用。默认为 esp_websocket_client（WiFi）。
+ * 4G 场景使用 p4c5_4g_get_transport() 获取 ML307 传输层。
+ *
+ * @param transport 传输层 vtable（传 NULL 恢复默认 WS）
+ */
+esp_err_t dsh_client_set_transport(const dsh_transport_t *transport);
 
 #ifdef __cplusplus
 }

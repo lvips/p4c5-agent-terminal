@@ -1,18 +1,18 @@
 /**
  * @file p4c5_4g.h
- * @brief P4C5 4G 模组 — ML307C Cat.1
+ * @brief P4C5 4G 模组 — ML307C Cat.1（完整实现）
  *
- * 使用 78/esp-ml307 v3.6.4 协议栈。
- * 提供 WebSocket / TCP / HTTP 通信能力。
+ * 基于 78/esp-ml307 v3.6.4 协议栈。
+ * 内部使用 AtModem::Detect() + WaitForNetworkReady()。
+ * 提供网络状态回调 + esp-ml307 NetworkInterface 访问。
  *
- * ⚠️ R2.1 风险：ALDO4=2.9V 可能不够 ML307C 标称 3.4-4.2V。
- *    ML307C-DC-CN 工作电压范围 3.4-4.2V（typ），
- *    但酷世原理图确认 ALDO4 输出 2.9V → M1 必须实测。
+ * ⚠️ ALDO4=2.9V vs ML307C 标称 3.4-4.2V — 需实测确认。
  */
 
 #pragma once
 
 #include "esp_err.h"
+#include "dsh_client_transport.h"
 #include <stdint.h>
 #include <stdbool.h>
 
@@ -20,82 +20,126 @@
 extern "C" {
 #endif
 
+/* ── 网络事件 ── */
+typedef enum {
+    P4C5_4G_EVENT_MODEM_DETECTING,    /* 正在检测模组 */
+    P4C5_4G_EVENT_MODEM_FOUND,        /* 模组已检测到 */
+    P4C5_4G_EVENT_REGISTERING,        /* 正在注册网络 */
+    P4C5_4G_EVENT_NETWORK_READY,      /* 网络就绪 */
+    P4C5_4G_EVENT_DISCONNECTED,       /* 网络断开 */
+    P4C5_4G_EVENT_NO_SIM,             /* 无 SIM 卡 */
+    P4C5_4G_EVENT_REG_DENIED,         /* 注册被拒绝 */
+    P4C5_4G_ERROR_INIT_FAILED,        /* 模组初始化失败 */
+    P4C5_4G_ERROR_TIMEOUT,            /* 超时 */
+} p4c5_4g_event_t;
+
 /**
- * @brief 初始化 4G 模组
+ * 网络事件回调
+ * @param event  事件类型
+ * @param data   附加数据（如运营商名、IMSI 等，可为 NULL）
+ * @param user_data 用户数据
+ */
+typedef void (*p4c5_4g_event_cb_t)(p4c5_4g_event_t event, const char *data, void *user_data);
+
+/* ══════════════════════════════════════════════════════════
+ * 生命周期
+ * ══════════════════════════════════════════════════════════ */
+
+/**
+ * 初始化 4G 模组（非阻塞）
  *
  * 步骤：
- *   1. 拉高 POWER_EN (GPIO4) 上电
- *   2. 初始化 UART (TX=53, RX=52, 115200)
- *   3. 配置 DTR (GPIO51) 用于 sleep 控制
- *   4. 通过 esp-ml307 发送 AT 指令检查模组状态
- *   5. 等待网络注册
+ *   1. 拉高 PWR_GPIO 上电
+ *   2. 配置 DTR_GPIO
+ *   3. 启动后台任务：AtModem::Detect → WaitForNetworkReady
  *
- * @return ESP_OK 成功，其他 失败
+ * @return ESP_OK 启动成功（网络注册在后台进行）
  */
 esp_err_t p4c5_4g_init(void);
 
 /**
- * @brief 建立 TCP 连接
- * @param host 服务器地址
- * @param port 端口
- * @param sock_fd 输出 socket fd
- * @return ESP_OK 成功
- */
-esp_err_t p4c5_4g_tcp_connect(const char* host, uint16_t port, int* sock_fd);
-
-/**
- * @brief 发送 TCP 数据
- * @param sock_fd socket fd
- * @param data 数据 buffer
- * @param len 数据长度
- * @return 实际发送字节数，< 0 表示错误
- */
-int p4c5_4g_tcp_send(int sock_fd, const void* data, int len);
-
-/**
- * @brief 接收 TCP 数据
- * @param sock_fd socket fd
- * @param buf 接收 buffer
- * @param len buffer 大小
- * @param timeout_ms 超时毫秒
- * @return 实际接收字节数，0=超时，< 0=错误
- */
-int p4c5_4g_tcp_recv(int sock_fd, void* buf, int len, int timeout_ms);
-
-/**
- * @brief 关闭 TCP 连接
- */
-esp_err_t p4c5_4g_tcp_close(int sock_fd);
-
-/**
- * @brief 查询信号强度 (RSSI)
- * @param rssi 输出 RSSI 值 (dBm)
- * @return ESP_OK 成功
- */
-esp_err_t p4c5_4g_get_rssi(int* rssi);
-
-/**
- * @brief 查询 SIM 卡状态
- * @param ready 输出 true=SIM ready
- * @return ESP_OK 成功
- */
-esp_err_t p4c5_4g_sim_ready(bool* ready);
-
-/**
- * @brief 进入低功耗模式（DTR 控制）
- */
-esp_err_t p4c5_4g_sleep(void);
-
-/**
- * @brief 唤醒模组
- */
-esp_err_t p4c5_4g_wake(void);
-
-/**
- * @brief 反初始化 4G 模组
+ * 反初始化（断电 + 释放资源）
  */
 void p4c5_4g_deinit(void);
 
+/* ══════════════════════════════════════════════════════════
+ * 状态查询
+ * ══════════════════════════════════════════════════════════ */
+
+/** 模组是否已检测到 */
+bool p4c5_4g_is_modem_detected(void);
+
+/** 网络是否就绪（已注册 + PDP 可用） */
+bool p4c5_4g_is_network_ready(void);
+
+/** 获取信号强度 CSQ（0-31, -1=无效） */
+int p4c5_4g_get_csq(void);
+
+/** 获取 CSQ 转 RSSI（dBm），无信号返回 0 */
+int p4c5_4g_get_rssi_dbm(void);
+
+/** 获取 IMEI（静态缓冲区，不需要 free） */
+const char *p4c5_4g_get_imei(void);
+
+/** 获取 ICCID */
+const char *p4c5_4g_get_iccid(void);
+
+/** 获取运营商名称 */
+const char *p4c5_4g_get_carrier(void);
+
+/** 获取模组固件版本 */
+const char *p4c5_4g_get_module_revision(void);
+
+/* ══════════════════════════════════════════════════════════
+ * 回调
+ * ══════════════════════════════════════════════════════════ */
+
+/**
+ * 注册网络事件回调
+ * @param cb   回调函数
+ * @param user_data 用户数据
+ */
+void p4c5_4g_set_event_callback(p4c5_4g_event_cb_t cb, void *user_data);
+
+/* ══════════════════════════════════════════════════════════
+ * 电源管理
+ * ══════════════════════════════════════════════════════════ */
+
+/** 进入低功耗模式（DTR=1） */
+esp_err_t p4c5_4g_sleep(void);
+
+/** 唤醒模组（DTR=0） */
+esp_err_t p4c5_4g_wake(void);
+
+/* ══════════════════════════════════════════════════════════
+ * 传输层适配器（供 dsh_client 使用）
+ * ══════════════════════════════════════════════════════════ */
+
+/**
+ * 获取 ML307 WebSocket 传输层
+ *
+ * 返回的 dsh_transport_t 可直接传给 dsh_client_set_transport()。
+ * 仅在模组已检测到时返回有效指针。
+ */
+const dsh_transport_t *p4c5_4g_get_transport(void);
+
 #ifdef __cplusplus
+}
+#endif
+
+/* ══════════════════════════════════════════════════════════
+ * C++ 内部接口 — 仅供 ML307 transport 使用
+ * ══════════════════════════════════════════════════════════ */
+#ifdef __cplusplus
+#include <memory>
+
+class AtModem;
+class NetworkInterface;
+
+namespace p4c5_4g_internal {
+    /** 获取 AtModem 实例（init 后有效） */
+    AtModem *get_modem();
+    /** 获取 NetworkInterface（用于 CreateWebSocket 等） */
+    NetworkInterface *get_network();
 }
 #endif

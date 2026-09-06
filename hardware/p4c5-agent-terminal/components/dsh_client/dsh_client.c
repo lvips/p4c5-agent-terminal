@@ -2,12 +2,13 @@
  * @file dsh_client.c
  * @brief DSH 客户端主控制逻辑
  *
- * 协调 WebSocket 传输层、帧构造/解析、心跳任务。
- * 对外提供 13 个 API。
+ * 通过 transport 抽象层支持多种 WebSocket 后端：
+ * - esp_websocket_client（WiFi，默认）
+ * - esp-ml307 WebSocket（4G，通过 dsh_client_set_transport()）
  */
 
 #include "dsh_client.h"
-#include "dsh_client_ws.h"
+#include "dsh_client_transport.h"
 #include "dsh_client_frames.h"
 #include "dsh_client_heartbeat.h"
 #include "esp_log.h"
@@ -32,63 +33,49 @@ static struct {
     uint32_t ws_buffer_size;
 } s_cfg = {0};
 
+/* 传输层 */
+static const dsh_transport_t *s_transport = NULL;
+
 /* 回调 */
-static dsh_client_event_cb_t  s_frame_cb     = NULL;
-static void                  *s_frame_cb_data = NULL;
-static dsh_client_state_cb_t  s_state_cb     = NULL;
-static void                  *s_state_cb_data = NULL;
-static dsh_client_status_cb_t s_status_cb    = NULL;
-static void                  *s_status_cb_data = NULL;
+static dsh_client_event_cb_t  s_frame_cb       = NULL;
+static void                  *s_frame_cb_data   = NULL;
+static dsh_client_state_cb_t  s_state_cb        = NULL;
+static void                  *s_state_cb_data    = NULL;
+static dsh_client_status_cb_t s_status_cb       = NULL;
+static void                  *s_status_cb_data   = NULL;
 
 /* ══════════════════════════════════════════════════════════
  * 内部回调桥接
  * ══════════════════════════════════════════════════════════ */
 
-/**
- * WebSocket JSON 帧回调 — 转发给应用层
- */
-static void on_ws_json(const char *json_text, const char *frame_type,
-                        cJSON *json, void *user_data)
+static void on_transport_json(const char *json_text, const char *frame_type,
+                               cJSON *json, void *user_data)
 {
     ESP_LOGD(TAG, "Frame RX: type=%s", frame_type ? frame_type : "null");
-
     if (s_frame_cb) {
         s_frame_cb(frame_type, json, s_frame_cb_data);
     }
 }
 
-/**
- * WebSocket 状态回调 — 管理连接状态 + 自动发送 HELLO + 心跳
- */
-static void on_ws_state(bool connected, void *user_data)
+static void on_transport_state(bool connected, void *user_data)
 {
     s_connected = connected;
 
     if (connected) {
         ESP_LOGI(TAG, "Connected → sending HELLO");
-
-        /* 发送 client/hello */
         dsh_client_send_hello();
-
-        /* 通知应用层 */
         if (s_state_cb) {
             s_state_cb(DSH_EVENT_CONNECTED, s_state_cb_data);
         }
     } else {
         ESP_LOGW(TAG, "Disconnected");
-
-        /* 停止心跳（重连成功后会自动重启） */
         dsh_heartbeat_stop();
-
         if (s_state_cb) {
             s_state_cb(DSH_EVENT_DISCONNECTED, s_state_cb_data);
         }
     }
 }
 
-/**
- * 心跳状态查询回调桥接
- */
 static void heartbeat_status_provider(int *battery, int *rssi, void *ud)
 {
     if (s_status_cb) {
@@ -129,57 +116,65 @@ esp_err_t dsh_client_init(const dsh_client_config_t *config)
         return ESP_ERR_NO_MEM;
     }
 
-    /* 初始化 WebSocket 传输层 */
-    esp_err_t err = dsh_ws_init(s_cfg.url, s_cfg.ws_buffer_size);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "WS init failed: %s", esp_err_to_name(err));
-        return err;
+    /* 选择传输层 */
+    if (!s_transport) {
+        /* 默认使用 esp_websocket_client（WiFi） */
+        s_transport = dsh_transport_get_ws();
+    }
+
+    /* 初始化传输层 */
+    if (s_transport && s_transport->init) {
+        esp_err_t err = s_transport->init(s_cfg.url, s_cfg.ws_buffer_size);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "Transport init failed: %s", esp_err_to_name(err));
+            return err;
+        }
     }
 
     /* 注册内部回调 */
-    dsh_ws_set_json_callback(on_ws_json, NULL);
-    dsh_ws_set_state_callback(on_ws_state, NULL);
+    if (s_transport && s_transport->set_json_cb) {
+        s_transport->set_json_cb(on_transport_json, NULL);
+    }
+    if (s_transport && s_transport->set_state_cb) {
+        s_transport->set_state_cb(on_transport_state, NULL);
+    }
 
     s_initialized = true;
-    ESP_LOGI(TAG, "DSH client initialized: url=%s, device=%s", s_cfg.url, s_cfg.device_id);
+    ESP_LOGI(TAG, "DSH client init: url=%s, device=%s, transport=%s",
+             s_cfg.url, s_cfg.device_id,
+             s_transport ? s_transport->name : "none");
     return ESP_OK;
 }
 
 esp_err_t dsh_client_connect(void)
 {
-    if (!s_initialized) {
-        ESP_LOGE(TAG, "Not initialized");
-        return ESP_ERR_INVALID_STATE;
-    }
-    if (s_connected) {
-        ESP_LOGW(TAG, "Already connected");
-        return ESP_OK;
-    }
+    if (!s_initialized) return ESP_ERR_INVALID_STATE;
+    if (s_connected) return ESP_OK;
 
     ESP_LOGI(TAG, "Connecting to %s...", s_cfg.url);
 
-    esp_err_t err = dsh_ws_start();
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "WS start failed: %s", esp_err_to_name(err));
-        return err;
+    if (s_transport && s_transport->start) {
+        esp_err_t err = s_transport->start();
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "Transport start failed: %s", esp_err_to_name(err));
+            return err;
+        }
     }
 
     /* 启动心跳（默认 30s） */
     dsh_client_start_heartbeat(30000);
-
     return ESP_OK;
 }
 
 esp_err_t dsh_client_disconnect(void)
 {
-    if (!s_initialized) {
-        return ESP_ERR_INVALID_STATE;
-    }
+    if (!s_initialized) return ESP_ERR_INVALID_STATE;
 
     dsh_heartbeat_stop();
-    dsh_ws_stop();
+    if (s_transport && s_transport->stop) {
+        s_transport->stop();
+    }
     s_connected = false;
-
     ESP_LOGI(TAG, "Disconnected");
     return ESP_OK;
 }
@@ -189,7 +184,9 @@ void dsh_client_deinit(void)
     if (!s_initialized) return;
 
     dsh_client_disconnect();
-    dsh_ws_deinit();
+    if (s_transport && s_transport->deinit) {
+        s_transport->deinit();
+    }
 
     free(s_cfg.url);
     free(s_cfg.device_id);
@@ -199,8 +196,8 @@ void dsh_client_deinit(void)
     s_frame_cb = NULL;
     s_state_cb = NULL;
     s_status_cb = NULL;
+    s_transport = NULL;
     s_initialized = false;
-
     ESP_LOGI(TAG, "Deinitialized");
 }
 
@@ -238,15 +235,20 @@ esp_err_t dsh_client_register_state_callback(dsh_client_state_cb_t cb, void *use
 esp_err_t dsh_client_send_hello(void)
 {
     cJSON *hello = dsh_frame_build_hello(
-        s_cfg.device_id,
-        DSH_CLIENT_VERSION,
-        NULL,  /* 使用默认能力集 */
-        s_cfg.auth_token
-    );
+        s_cfg.device_id, DSH_CLIENT_VERSION, NULL, s_cfg.auth_token);
     if (!hello) return ESP_ERR_NO_MEM;
 
-    esp_err_t err = dsh_ws_send_json(hello);
+    char *text = cJSON_PrintUnformatted(hello);
     cJSON_Delete(hello);
+    if (!text) return ESP_ERR_NO_MEM;
+
+    esp_err_t err = ESP_OK;
+    if (s_transport && s_transport->send_text) {
+        err = s_transport->send_text(text, strlen(text));
+    } else {
+        err = ESP_ERR_NOT_SUPPORTED;
+    }
+    free(text);
     return err;
 }
 
@@ -260,8 +262,17 @@ esp_err_t dsh_client_send_heartbeat(void)
     cJSON *hb = dsh_frame_build_heartbeat(battery, rssi);
     if (!hb) return ESP_ERR_NO_MEM;
 
-    esp_err_t err = dsh_ws_send_json(hb);
+    char *text = cJSON_PrintUnformatted(hb);
     cJSON_Delete(hb);
+    if (!text) return ESP_ERR_NO_MEM;
+
+    esp_err_t err = ESP_OK;
+    if (s_transport && s_transport->send_text) {
+        err = s_transport->send_text(text, strlen(text));
+    } else {
+        err = ESP_ERR_NOT_SUPPORTED;
+    }
+    free(text);
     return err;
 }
 
@@ -269,22 +280,26 @@ esp_err_t dsh_client_send_tool_result(const char *tool_id, cJSON *result)
 {
     if (!tool_id) return ESP_ERR_INVALID_ARG;
 
-    const char *result_str = NULL;
-    char *result_json = NULL;
-
-    /* 如果 result 是 cJSON 对象，序列化为字符串 */
+    char *result_str = NULL;
     if (result) {
-        result_json = cJSON_PrintUnformatted(result);
-        result_str = result_json;
+        result_str = cJSON_PrintUnformatted(result);
     }
 
     cJSON *frame = dsh_frame_build_tool_result(tool_id, "success", result_str, NULL);
-    free(result_json);
-
+    free(result_str);
     if (!frame) return ESP_ERR_NO_MEM;
 
-    esp_err_t err = dsh_ws_send_json(frame);
+    char *text = cJSON_PrintUnformatted(frame);
     cJSON_Delete(frame);
+    if (!text) return ESP_ERR_NO_MEM;
+
+    esp_err_t err = ESP_OK;
+    if (s_transport && s_transport->send_text) {
+        err = s_transport->send_text(text, strlen(text));
+    } else {
+        err = ESP_ERR_NOT_SUPPORTED;
+    }
+    free(text);
     return err;
 }
 
@@ -295,8 +310,17 @@ esp_err_t dsh_client_send_user_input(const char *text)
     cJSON *frame = dsh_frame_build_user_input(text);
     if (!frame) return ESP_ERR_NO_MEM;
 
-    esp_err_t err = dsh_ws_send_json(frame);
+    char *json_text = cJSON_PrintUnformatted(frame);
     cJSON_Delete(frame);
+    if (!json_text) return ESP_ERR_NO_MEM;
+
+    esp_err_t err = ESP_OK;
+    if (s_transport && s_transport->send_text) {
+        err = s_transport->send_text(json_text, strlen(json_text));
+    } else {
+        err = ESP_ERR_NOT_SUPPORTED;
+    }
+    free(json_text);
     return err;
 }
 
@@ -307,8 +331,17 @@ esp_err_t dsh_client_send(const char *frame_type, cJSON *payload)
     cJSON *frame = dsh_frame_build_generic(frame_type, payload);
     if (!frame) return ESP_ERR_NO_MEM;
 
-    esp_err_t err = dsh_ws_send_json(frame);
+    char *text = cJSON_PrintUnformatted(frame);
     cJSON_Delete(frame);
+    if (!text) return ESP_ERR_NO_MEM;
+
+    esp_err_t err = ESP_OK;
+    if (s_transport && s_transport->send_text) {
+        err = s_transport->send_text(text, strlen(text));
+    } else {
+        err = ESP_ERR_NOT_SUPPORTED;
+    }
+    free(text);
     return err;
 }
 
@@ -318,7 +351,6 @@ esp_err_t dsh_client_send(const char *frame_type, cJSON *payload)
 
 esp_err_t dsh_client_start_heartbeat(uint32_t interval_ms)
 {
-    /* 先停止旧的（如果有） */
     dsh_heartbeat_stop();
     return dsh_heartbeat_start(interval_ms, heartbeat_status_provider, NULL);
 }
@@ -329,22 +361,31 @@ esp_err_t dsh_client_stop_heartbeat(void)
 }
 
 /* ══════════════════════════════════════════════════════════
- * 网络接口
+ * 网络接口 + 状态提供者 + 传输层切换
  * ══════════════════════════════════════════════════════════ */
 
 esp_err_t dsh_client_attach_netif(esp_netif_t *netif)
 {
-    return dsh_ws_attach_netif(netif);
+    /* 仅对 esp_websocket_client 传输层有效 */
+    ESP_LOGI(TAG, "attach_netif: %p (WiFi transport only)", netif);
+    return ESP_OK;
 }
-
-/* ══════════════════════════════════════════════════════════
- * 状态提供者
- * ══════════════════════════════════════════════════════════ */
 
 esp_err_t dsh_client_set_status_provider(dsh_client_status_cb_t cb, void *user_data)
 {
     s_status_cb = cb;
     s_status_cb_data = user_data;
     ESP_LOGI(TAG, "Status provider %s", cb ? "registered" : "cleared");
+    return ESP_OK;
+}
+
+esp_err_t dsh_client_set_transport(const dsh_transport_t *transport)
+{
+    if (s_initialized) {
+        ESP_LOGE(TAG, "Cannot change transport after init");
+        return ESP_ERR_INVALID_STATE;
+    }
+    s_transport = transport;
+    ESP_LOGI(TAG, "Transport set: %s", transport ? transport->name : "default (WS)");
     return ESP_OK;
 }

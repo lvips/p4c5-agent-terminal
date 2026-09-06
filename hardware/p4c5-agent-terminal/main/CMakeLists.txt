@@ -7,6 +7,11 @@ idf_component_register(SRCS ${SOURCES}
     INCLUDE_DIRS "."
     REQUIRES
         p4c5_board
+        p4c5_pmic
+        p4c5_display
+        p4c5_audio
+        p4c5_4g
+        dsh_client
         esp_driver_gpio
         esp_driver_i2c
         esp_driver_i2s
