@@ -242,8 +242,8 @@ void app_main(void)
 #endif  /* W1 disabled */
 
     /* [5] DSH Client — WiFi transport */
-    ESP_LOGI(TAG, "[5/6] DSH client init...");
-
+    ESP_LOGI(TAG, "[5/6] DSH client init (skipped - no WiFi, avoid lwIP assert)...");
+#if 0  /* W1 disabled: DSH 依赖 WiFi, 避免 lwIP tcpip_send_msg_wait_sem panic */
     dsh_client_config_t dsh_cfg = {
         .url = CONFIG_P4C5_DSH_WEBSOCKET_URL,
         .device_id = CONFIG_P4C5_DSH_DEVICE_ID,
@@ -261,6 +261,7 @@ void app_main(void)
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "DSH connect via WiFi failed (will retry): %s", esp_err_to_name(err));
     }
+#endif  /* W1 disabled */
 
     ESP_LOGI(TAG, "=========================================");
     ESP_LOGI(TAG, "  All subsystems initialized");
@@ -278,7 +279,10 @@ void app_main(void)
         esp_task_wdt_reset();
         vTaskDelay(pdMS_TO_TICKS(10000));
 
-        /* W1 fix: 用 wifi_manager_get_status() 真实检测 WiFi 状态 */
+        /* W1 fix: 暂时只显示 bat, wifi/dsh 禁用避免触发 lwIP/WiFi init panic */
+        ESP_LOGI(TAG, "💓 bat=%u%% (WiFi/DSH 临时禁用)",
+                 p4c5_pmic_get_battery_level());
+#if 0  /* W1 disabled: heartbeat 触发 WiFi init panic */
         wifi_manager_status_t wifi_st = {0};
         wifi_manager_get_status(&wifi_st);
         ESP_LOGI(TAG, "💓 bat=%u%% dsh=%s wifi=%s (IP=%s mode=%s)",
@@ -304,5 +308,6 @@ void app_main(void)
                 ESP_LOGW(TAG, "📡 Scan failed or no AP found");
             }
         }
+#endif  /* W1 disabled */
     }
 }
