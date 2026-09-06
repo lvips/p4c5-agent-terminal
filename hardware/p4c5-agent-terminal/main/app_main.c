@@ -223,15 +223,15 @@ void app_main(void)
     };
     ESP_ERROR_CHECK(wifi_manager_start(&wifi_cfg));
 
-    /* 等待 STA 连接 (最多 30s) */
-    ESP_LOGI(TAG, "Waiting for WiFi STA connection (max 30s)...");
-    esp_err_t wifi_ret = wifi_manager_wait_connected(30000);
+    /* 等待 STA 连接 (最多 20s — 必须 < TWDT 30s timeout) */
+    ESP_LOGI(TAG, "Waiting for WiFi STA connection (max 20s)...");
+    esp_err_t wifi_ret = wifi_manager_wait_connected(20000);
     if (wifi_ret == ESP_OK) {
         ESP_LOGI(TAG, "WiFi STA connected ✅");
     } else {
         ESP_LOGW(TAG, "WiFi STA connection timeout (fallback to AP mode)");
     }
-    esp_task_wdt_reset();
+    esp_task_wdt_reset();  /* TWDT reset (WiFi wait 不能超过 TWDT) */
 
     /* [5] DSH Client — WiFi transport */
     ESP_LOGI(TAG, "[5/6] DSH client init...");
