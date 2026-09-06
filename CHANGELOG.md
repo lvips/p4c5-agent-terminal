@@ -7,11 +7,29 @@
 
 ## [Unreleased]
 
+### Added (本会话新增)
+
+**W4: 语音唤醒 (P4 自实现)**
+- `audio_pipeline/wake_word_detector/` 新组件 (RMS-based 唤醒 + 自适应阈值)
+- audio_uplink_task 集成 wake 状态机 (IDLE ↔ ACTIVE 自动切换)
+- 串口命令 `wake enable/disable/status`
+- 6 个单元测试 (tools/wake_detector_test.py, 6/6 通过)
+- `tools/esp32_test.py` ESP32 真机验证脚本
+- `docs/hw/P4C5-deploy-guide.md` 完整部署指南 (W1-W4 汇总)
+
+**W3: 完整音频链路 (上一会话已完成, 本会话整合)**
+- 4 麦软件 AEC (aec_sw NLMS)
+- 24k→16k 重采样 (resampler_24_16)
+- Opus 编码 (16kbps/20ms)
+- tts_player 组件 (WS Binary → ES8311 DAC)
+- dsh_client WS Binary 支持 (W3: send + receive)
+- mock_dsh_server broadcast 模式
+- 3 种集成测试 (单/双/4 组件)
+
 ### Planned
-- M2: HANDOFF 机制实测
-- M3: 试运行真实任务 + 最终文档
-- M4: 真机集成 + PoC（屏幕 + 4G + 传感器）
-- M5: 长稳测试 + 低功耗优化
+- W5: 火山豆包 TTS 真实接入 (需 API key)
+- W4+: 真实 WakeNet9 (需 ESP32-S3 协处理)
+- speexdsp AEC 升级 (可选)
 
 ---
 
