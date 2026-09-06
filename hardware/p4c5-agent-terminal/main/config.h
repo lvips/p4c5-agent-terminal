@@ -47,8 +47,12 @@
 #define P4C5_AUDIO_INPUT_REF      true           /* AEC 参考通道 */
 
 /* ── 音频 I2C 地址 ── */
-#define P4C5_ES8311_I2C_ADDR      0x18
-#define P4C5_ES7210_I2C_ADDR      0x40
+/* 注意：esp_codec_dev 的 audio_codec_i2c_cfg_t 使用旧式地址格式（包含 R/W 位），
+   内部会自动 >> 1。所以这里要传预移位的地址。
+   ES8311 实际 7-bit 地址 = 0x18，传入 0x18 << 1 = 0x30
+   ES7210 实际 7-bit 地址 = 0x40，传入 0x40 << 1 = 0x80 */
+#define P4C5_ES8311_I2C_ADDR      (0x18 << 1)  /* 0x30, codec driver will >> 1 back to 0x18 */
+#define P4C5_ES7210_I2C_ADDR      (0x40 << 1)  /* 0x80, codec driver will >> 1 back to 0x40 */
 
 /* ── PMIC (AXP2101) ── */
 #define P4C5_PMIC_I2C_ADDR        0x34
