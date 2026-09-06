@@ -32,4 +32,28 @@ menu "P4C5 Agent Terminal"
         help
             Feed I2S DAC output as AEC reference channel to ES7210.
 
+    menu "DSH Client Configuration"
+
+        config P4C5_DSH_WEBSOCKET_URL
+            string "DSH WebSocket URL"
+            default "ws://dsh.example.com/ws"
+            help
+                WebSocket URL for DSH (DeepSeek Harness) server.
+                Example: ws://192.168.1.100:8765/ws
+
+        config P4C5_DSH_DEVICE_ID
+            string "DSH Device ID"
+            default "p4c5-001"
+            help
+                Unique device identifier sent to DSH server.
+
+        config P4C5_DSH_AUTH_TOKEN
+            string "DSH Auth Token"
+            default ""
+            help
+                Authentication token for DSH server.
+                Leave empty if server does not require authentication.
+
+    endmenu
+
 endmenu

@@ -267,9 +267,10 @@ void app_main(void)
     }
 
     dsh_client_config_t dsh_cfg = {
-        .url = "ws://dsh.example.com/ws",   /* TODO: 从 menuconfig 读取 */
-        .device_id = "p4c5-001",
-        .auth_token = NULL,
+        .url = CONFIG_P4C5_DSH_WEBSOCKET_URL,
+        .device_id = CONFIG_P4C5_DSH_DEVICE_ID,
+        .auth_token = (strlen(CONFIG_P4C5_DSH_AUTH_TOKEN) > 0)
+                      ? CONFIG_P4C5_DSH_AUTH_TOKEN : NULL,
     };
 
     dsh_client_init(&dsh_cfg);
