@@ -444,6 +444,10 @@ uint16_t p4c5_pmic_get_vbat_mv(void)
 {
     if (!s_initialized) return 0;
 
+    /* AXP2101 ADC 必须先启用 */
+    uint8_t adc_en = pmic_i2c_read_reg(AXP2101_REG_ADC_ENABLE);
+    pmic_i2c_write_reg(AXP2101_REG_ADC_ENABLE, adc_en | 0x10);  /* bit[4] = VBAT ADC enable */
+
     uint8_t hi = pmic_i2c_read_reg(0x34);
     uint8_t lo = pmic_i2c_read_reg(0x35);
 
@@ -463,6 +467,10 @@ uint16_t p4c5_pmic_get_vbat_mv(void)
 uint16_t p4c5_pmic_get_vbus_mv(void)
 {
     if (!s_initialized) return 0;
+
+    /* AXP2101 ADC 必须先启用，否则读到全 0 */
+    uint8_t adc_en = pmic_i2c_read_reg(AXP2101_REG_ADC_ENABLE);
+    pmic_i2c_write_reg(AXP2101_REG_ADC_ENABLE, adc_en | 0x20);  /* bit[5] = VBUS ADC enable */
 
     uint8_t hi = pmic_i2c_read_reg(0x38);
     uint8_t lo = pmic_i2c_read_reg(0x39);
@@ -498,12 +506,20 @@ void p4c5_pmic_print_adc(void)
         ESP_LOGW(TAG, "ADC read failed");
         return;
     }
+
+    /* AXP2101 Power Status (REG 0x00) - 判断电源路径 */
+    uint8_t pmu_status_1 = pmic_i2c_read_reg(0x00);
+    uint8_t pmu_status_2 = pmic_i2c_read_reg(0x01);
+
     ESP_LOGI(TAG, "PMIC ADC self-test:");
+    ESP_LOGI(TAG, "  PMU_STATUS_1 = 0x%02X (bit0:VBUS在场 bit1:VInBat在场 bit2:VBat在场)",
+        pmu_status_1);
+    ESP_LOGI(TAG, "  PMU_STATUS_2 = 0x%02X", pmu_status_2);
     ESP_LOGI(TAG, "  VBUS  = %u mV  %s",
         adc.vbus_mv,
         (adc.vbus_mv >= 4500) ? "(USB 5V ✅)" :
         (adc.vbus_mv >= 4000) ? "(USB 偏低 ⚠️)" :
-        "(USB 欠压 ❌)");
+        (pmu_status_1 & 0x01 ? "(VBUS在场但ADC=0 ?)" : "(VBUS 不在场 ❌)"));
     ESP_LOGI(TAG, "  VBAT  = %u mV  %s",
         adc.vbat_mv,
         adc.vbat_mv == 0 ? "(无电池)" :
