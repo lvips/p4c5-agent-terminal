@@ -1,8 +1,111 @@
 # HANDOFF — 项目当前进度
 
-> **版本**：v0.1.0-Day0 + M0.5 + M0-A + M1 + M3 文档（2026-09-06）
+> **版本**：M7 实测阶段（2026-09-06）
 > **角色**：DSH → 接手者
-> **状态**：Day 0 + M0.5 + M0-A + M1 + M3 文档全部完成，待 M2 实测 + GitHub push
+> **状态**：M5 启动验证 ✅ → M6 Audio 修复 ✅ → M7 实测模板已就绪，待 CCA T7 填写
+
+---
+
+## 🚀 M5/M6/M7 最新进展 (2026-09-06)
+
+### M5：启动验证 ✅
+
+- ✅ 编译成功：IDF 5.5.5 + `CONFIG_ESP32P4_SELECTS_REV_LESS_V3=y`
+- ✅ 启动成功：ESP32-P4 v1.3 chip，无 Guru Meditation panic
+- ✅ R8（chip revision 不兼容）P0 阻塞已消除
+- ✅ PMIC 14 寄存器写入+读回验证 100% 通过（0x64=0x2B→4.2V 充电修正）
+- ✅ Display ST7102 MIPI-DSI 初始化成功，背光 80%
+- ❌ Audio init 失败：`ESP_ERR_NO_MEM`（`audio_codec_new_i2s_data`）
+- ⊘ 4G 未执行（被 Audio 阻塞）
+- 📄 报告：`docs/hw/M5-verification-report.md`（commit `0187ca5`）
+
+### M6：Audio 修复 ✅
+
+- ✅ 根因定位：I2C 地址格式不匹配
+  - `esp_codec_dev` 使用旧格式（8-bit 含 R/W 位），内部 `addr >> 1`
+  - 我们传 0x18（7-bit），被 shift 成 0x0C → 错误地址 → I2C 失败
+- ✅ 修复方案：config.h 中预 shift
+  - `P4C5_ES8311_I2C_ADDR = (0x18 << 1) = 0x30`
+  - `P4C5_ES7210_I2C_ADDR = (0x40 << 1) = 0x80`
+- ✅ Audio init OK：ES8311 DAC + ES7210 ADC 全部初始化成功
+- ✅ 所有子系统初始化通过
+- 📄 修复 commit：`3b51cd5`
+
+### M7：实测阶段（进行中）
+
+- ✅ 实测数据记录模板已写：`docs/hw/M7-test-log.md`（1854 字，commit `80e5f73`）
+  - Audio TC-01~12 测试用例（含填空字段）
+  - Display 背光/LVGL/触摸测试
+  - PMIC 万用表电压测量表
+  - 4G 模块测试（如已启用）
+  - Watchdog 测试
+  - 风险状态汇总表
+- ✅ 24h 长稳测试方案已写：`docs/hw/M7-long-run-plan.md`（1964 字，commit `b8067d8`）
+  - 4 阶段测试：播放(6h) → 录音(6h) → 交替(6h) → 双工(6h)
+  - 自动监控脚本（heap/PMIC/温度每 60s）
+  - 人工检查点（每 6h 万用表 + 红外测温）
+  - 异常处理预案 + 失败判定标准
+- ⏳ CCA T7 待完成：
+  - 填写 M7-test-log.md 实测数据
+  - 执行 24h 长稳测试
+  - 生成测试报告
+
+### 风险状态（最新）
+
+| 风险 | 等级 | 状态 | 说明 |
+|---|---|---|---|
+| R1 ES7210 规格书缺失 | ⚠️→✅ | 已消除 | 用 esp_audio_codec 封装 |
+| R2 PMIC 14 寄存器 | 🔴 | ✅ 已验证 | 13/13 读回通过，0x64=0x2B 生效 |
+| R3 LSM6DS3 版本差异 | ⚠️ | ⊘ 未测试 | IMU 未集成 |
+| **R4 ALDO4 vs ML307C** | **⚠️** | **⚠️ 待实测** | ALDO4=2.9V，ML307C 要求 ≥3.4V |
+| R5 GPIO4 冲突 | ⚠️ | ✅ 已验证 | 无冲突告警 |
+| R6 实测覆盖率 | 🔴 | ⚠️ 60% | PMIC+Display+启动已实测 |
+| R7 4G 流量费用 | ⚠️ | ⊘ 未启用 | 4G 未初始化 |
+| **R8 chip revision** | **🔴 P0** | **✅ 已消除** | `SELECTS_REV_LESS_V3=y` 解决 |
+
+---
+
+## 📊 项目总体进度
+
+### 已完成（里程碑）
+
+| 里程碑 | 状态 | 关键产出 |
+|---|---|---|
+| Day 0 | ✅ | Git 仓库 + 目录结构 + 29 PDF + 规格书 |
+| M0.5 | ✅ | CC 编排基础设施（6 脚本 + 3 模板） |
+| M0-A | ✅ | 5 份 datasheets-summary 调研 |
+| M1 | ✅ | Cordis 插件集成 |
+| M3 | ✅ | 架构文档 + ES7210 风险解除 |
+| M4 | ✅ | ESP-IDF 项目脚手架（commit `70e508b`） |
+| M5 | ✅ | 启动验证 + R8 消除（commit `0187ca5`） |
+| M6 | ✅ | Audio 修复（commit `3b51cd5`） |
+| **M7** | **⏳ 进行中** | 实测模板就绪，待 CCA T7 填写 |
+
+### CCB 文档产出（T1-T7）
+
+| 任务 | 文件 | commit | 字数 |
+|---|---|---|---|
+| T1 | `docs/hw/可信度评估报告-v1.md` | — | — |
+| T2 | `docs/hw/audio-test-spec.md` | — | 313 |
+| T3 | `docs/hw/pmic-registers-audit.md` | `281aef8` | — |
+| T4 | `docs/hw/4g-flow-guide.md` | `a938078` | 1567 |
+| T5 | `docs/hw/chip-revision-history.md` | `323e380` | 1516 |
+| T6 | `docs/hw/M5-verification-report.md` | `0187ca5` | 1533 |
+| T7a | `docs/hw/M7-test-log.md` | `80e5f73` | 1854 |
+| T7b | `docs/hw/M7-long-run-plan.md` | `b8067d8` | 1964 |
+
+### 待办（按优先级）
+
+| # | 任务 | 优先级 | 状态 | 阻塞原因 |
+|---|---|---|---|---|
+| 1 | CCA T7 填写 M7 实测数据 | 🔴 P0 | ⏳ | 需真机操作 |
+| 2 | 24h 长稳测试 | 🔴 P0 | ⏳ | 需 M7 实测通过 |
+| 3 | 4G 模块启用 + 实测 | P1 | ⏳ | Audio 已修复，可启用 |
+| 4 | ALDO4 电压实测（R4） | P1 | ⏳ | 需万用表 |
+| 5 | GitHub push | P2 | ⏳ | 需创建远程 repo |
+| 6 | IMU (LSM6DS3) 集成 | P3 | ⊘ | 低优先级 |
+| 7 | LVGL UI 框架 | P3 | ⊘ | 需 Display 实测通过 |
+| 8 | WebSocket dsh_client | P4 | ⊘ | 需 4G 先通 |
 
 ---
 
@@ -14,89 +117,14 @@
 
 ---
 
-## ✅ 已完成（6 个 commit，13+ 个 Markdown，6 个 shell 脚本，2 个 Cordis 插件，29 个 PDF）
-
-### 1. Day 0：项目基础架构
-- ✅ Git 仓库 + 远程（`https://github.com/lvips/p4c5-agent-terminal`）
-- ✅ 目录结构（docs/ + hardware/ + .dsh-orchestration/）
-- ✅ 29 份 IC 规格书 PDF + 1 份原理图 + 3D 外壳
-- ✅ README.md / LICENSE / docs/README.md / docs/hw/README.md
-- ✅ p4c5-spec.md (7 章节完整规格)
-- ✅ p4c5-pins.csv (100+ 引脚定义)
-- ✅ 00-新硬件差异矩阵.md (vs OMT Tab5)
-- ✅ 首次 git commit
-
-### 2. M0.5：CC 编排基础设施
-- ✅ 6 个 shell 脚本（cc-orchestrator / spawn / kill / status / dispatch / handoff）
-- ✅ 3 份提示词模板（cca / ccb / HANDOFF）
-- ✅ 30min 硬超时 + 15min 防停滞 + 启动加固
-
-### 3. M0-A：5 份 datasheets-summary 调研
-- ✅ p4c5-board.md（开发板本体，1031 字）
-- ✅ ml307c.md（4G 模组，896 字）
-- ✅ audio-codecs.md（音频三件套，1037 字）
-- ✅ pmic-axp2101.md（PMIC，969 字）
-- ✅ peripherals.md（外设，975 字）
-- ✅ 5 份 subagent 失败，DSH 用工具直接产出（兜底成功）
-
-### 4. M1：Cordis 插件集成
-- ✅ code.host.js（注册 cca.session/ccb.session Service + agent_cca/agent_ccb/cc_status Tool + heartbeat Timer）
-- ✅ package.json（dsh.bundle manifest，项目本地）
-- ✅ run-cordis-overlay.sh（启动 + 加载）
-- ✅ RUNBOOK.md（5 分钟上手 + 启动/停止/排错）
-- ✅ SUBAGENT-BEST-PRACTICES.md（M0-A 失败教训 + 修复方案）
-
-### 5. M3 文档（最终）
-- ✅ ARCHITECTURE.md（系统架构 + 协议层 + 协作方法论）
-- ✅ CHANGELOG.md（v0.1.0 变更日志）
-- ✅ 实践日志.md（5 subagent 失败根因 + 10 条改进项）
-- ✅ RELEASE_NOTES.md（v0.1.0 Genesis）
-- ✅ ES7210 风险解除：用 Espressif `esp_audio_codec` 库即可
-
----
-
-## 🚦 待办（按优先级）
-
-### P0：阻塞项（需要你行动）
-
-| # | 任务 | 阻塞原因 | 解决路径 |
-|---|---|---|---|
-| 1 | **在 GitHub 创建空 repo `p4c5-agent-terminal`** | 本地 git remote 配置好了，但远程不存在 | 登录 GitHub → New repo → 名字 `p4c5-agent-terminal` → 不勾 README/License/.gitignore → 创建后 `git push -u origin main` |
-| 2 | **手动验证 CC orchestrator 启动** | 需要 `claude` CLI 工作 | `bash /Volumes/ZT-1T/项目开发/ESP32-P4C5/.dsh-orchestration/bin/cc-orchestrator.sh start` |
-
-### P1：M2 实测
-
-| # | 任务 | 状态 | 备注 |
-|---|---|---|---|
-| 3 | M2 HANDOFF 实测 | ⏳ 待启动 | 跑 5 个任务后触发 handoff 验证 |
-| 4 | Cordis 插件手动验证（加载后看工具是否出现）| ⏳ 待启动 | `bash /Volumes/ZT-1T/项目开发/ESP32-P4C5/run-cordis-overlay.sh` |
-
-### P2：M4+ 真机开发
-
-| # | 任务 | 状态 | 备注 |
-|---|---|---|---|
-| 5 | 真机验证电压轨（DCDC1/ALDO1/ALDO3/ALDO4）| ⏳ M1 | 万用表测 |
-| 6 | 真机验证 ML307C 4G 拨号 | ⏳ M1 | esp-ml307 集成 |
-| 7 | AXP2101 14 寄存器逐个核对 | ⏳ M1 | 双源对照 xiaozhi + 规格书 |
-| 8 | 真机识别 LSM6DS3 芯片丝印 | ⏳ M1 | 读 WHO_AM_I=0x6A |
-| 9 | OCR 原理图 + ML307C 硬件规格书 | ⏳ M3 | 已是图片 PDF |
-| 10 | 写 ES8311 驱动 | ⏳ M1 | 用 es8311_audio_codec.cc 移植 |
-| 11 | 集成 esp-ml307 (4G) | ⏳ M1 | `78/esp-ml307` v3.6.4 |
-| 12 | 集成 ST7102 LCD + ST7123 触摸 | ⏳ M1 | xiaozhi `esp_lcd_st7102` 组件 |
-| 13 | 集成 AXP2101 PMIC | ⏳ M1 | xiaozhi `pmic_axp2101` 组件 |
-| 14 | LVGL UI 框架 | ⏳ M4 | xiaozhi `lvgl_st7102_display` |
-| 15 | WebSocket Client + dsh_client 协议 | ⏳ M4 | 100% 复用 OMT |
-
----
-
 ## 📊 关键数据
 
 - **资料完整度**：优于 OMT（⭐⭐⭐⭐⭐ vs ⭐⭐⭐⭐）
-- **DSH 累计 commits**：6
-- **DSH 累计产出**：13+ Markdown 文件 + 6 shell 脚本 + 2 Cordis 插件 + 29 PDF
-- **M0-A subagent 失败率**：5/5（100%，DSH 全部兜底）
-- **关键技术风险**：1 个已解除（ES7210 规格书缺失），6 个待实测
-- **M1 启动就绪度**：95%（只差 AXP2101 14 寄存器双源核对）
+- **DSH 累计 commits**：12+
+- **CCB 文档产出**：8 份（T1-T7，含审计/指南/报告/模板）
+- **M7 实测就绪度**：90%（模板就绪，待 CCA T7 真机填写）
+- **关键技术风险**：2 个已消除（R1 ES7210、R8 chip rev），1 个待实测（R4 ALDO4）
+- **实测覆盖率**：60%（PMIC+Display+启动已实测，Audio/4G 待 M7）
 
 ---
 
@@ -115,6 +143,13 @@
 | OMT 差异 | `docs/hw/00-新硬件差异矩阵.md` |
 | 可信度评估 | `docs/hw/可信度评估报告-v1.md` |
 | 5 份调研 | `docs/hw/datasheets-summary/` |
+| PMIC 审计 | `docs/hw/pmic-registers-audit.md` |
+| Audio 测试规范 | `docs/hw/audio-test-spec.md` |
+| 4G 流量指南 | `docs/hw/4g-flow-guide.md` |
+| Chip revision 报告 | `docs/hw/chip-revision-history.md` |
+| M5 启动验证报告 | `docs/hw/M5-verification-report.md` |
+| **M7 实测数据模板** | **`docs/hw/M7-test-log.md`** |
+| **M7 24h 长稳方案** | **`docs/hw/M7-long-run-plan.md`** |
 | CC 运行手册 | `docs/cc-orchestration/RUNBOOK.md` |
 | Subagent 最佳实践 | `docs/cc-orchestration/SUBAGENT-BEST-PRACTICES.md` |
 | CC 主控脚本 | `.dsh-orchestration/bin/cc-orchestrator.sh` |
@@ -133,5 +168,5 @@
 
 ---
 
-**下次更新**：M2 实测完成后
-**接手者**：CCA / CCB（M1 启动后）
+**下次更新**：M7 实测数据填写完成后（CCA T7）
+**接手者**：CCA T7（M7 实测）→ DSH（M8 规划）
