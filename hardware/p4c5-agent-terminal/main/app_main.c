@@ -206,6 +206,11 @@ void app_main(void)
     }
     ESP_ERROR_CHECK(ret);
 
+    /* W1 hotfix: 临时禁用 WiFi (esp_wifi_init 0x3001 panic 导致黑白闪屏)
+       等 wifi_manager 完整修复后再启用 */
+    ESP_LOGW(TAG, "⚠️ W1 hotfix: WiFi 临时禁用 (esp_wifi_init 0x3001 panic)");
+
+#if 0  /* W1 disabled — 等待 WiFi 链路完整修复 */
     /* WiFi manager 初始化 */
     ESP_ERROR_CHECK(wifi_manager_init());
 
@@ -222,7 +227,9 @@ void app_main(void)
         .max_retry = 5,
     };
     ESP_ERROR_CHECK(wifi_manager_start(&wifi_cfg));
+#endif  /* W1 disabled */
 
+#if 0  /* W1 disabled: wait_connected 一起禁用 */
     /* 等待 STA 连接 (最多 20s — 必须 < TWDT 30s timeout) */
     ESP_LOGI(TAG, "Waiting for WiFi STA connection (max 20s)...");
     esp_err_t wifi_ret = wifi_manager_wait_connected(20000);
@@ -232,6 +239,7 @@ void app_main(void)
         ESP_LOGW(TAG, "WiFi STA connection timeout (fallback to AP mode)");
     }
     esp_task_wdt_reset();  /* TWDT reset (WiFi wait 不能超过 TWDT) */
+#endif  /* W1 disabled */
 
     /* [5] DSH Client — WiFi transport */
     ESP_LOGI(TAG, "[5/6] DSH client init...");

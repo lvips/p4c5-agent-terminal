@@ -31,7 +31,7 @@
 #include "p4c5_board.h"
 #include "p4c5_display.h"
 #include "p4c5_pmic.h"
-#include "p4c5_4g.h"
+// #include "p4c5_4g.h"  // W1: 4G 搁置 (需电池)
 #include "dsh_client.h"
 #include "config.h"
 

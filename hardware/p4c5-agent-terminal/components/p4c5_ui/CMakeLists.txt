@@ -23,7 +23,7 @@ idf_component_register(
         freertos
         p4c5_board
         p4c5_pmic
-        p4c5_4g
+        # p4c5_4g  # W1: 4G 搁置 (需电池)
         p4c5_display
         dsh_client
     PRIV_REQUIRES

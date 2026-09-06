@@ -28,8 +28,6 @@ dependencies:
     path: ../components/p4c5_display
   p4c5_pmic:
     path: ../components/p4c5_pmic
-  p4c5_4g:
-    path: ../components/p4c5_4g
   p4c5_ui:
     path: ../components/p4c5_ui
   dsh_client:
