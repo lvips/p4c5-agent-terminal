@@ -1,0 +1,54 @@
+# =============================================================
+# p4c5-agent-terminal — Git Ignore
+# =============================================================
+
+# ---- 运行时状态（CC orchestration 状态文件）----
+.dsh-orchestration/state/
+.dsh-orchestration/logs/
+.dsh-orchestration/locks/
+*.pid
+*.session-id
+
+# ---- 原始硬件资料（已分类整理到 docs/hw/，原始目录不入仓）----
+硬件开源资料/
+
+# ---- ESP-IDF 构建产物 ----
+build/
+sdkconfig
+sdkconfig.old
+managed_components/
+dependencies.lock
+
+# ---- ESP-IDF 烧录工具产物 ----
+.flash_*.bin
+.elf_*.txt
+
+# ---- 临时调试产物 ----
+*.log
+!docs/**/*.log
+
+# ---- IDE ----
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# ---- 私密文件 ----
+.env
+.env.local
+*.key
+*.pem
+
+# ---- Python ----
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# ---- Node（tab5-adapter 复刻时启用）----
+node_modules/
+package-lock.json
+
+# ---- macOS ----
+._*
+.Spotlight-V100
+.Trashes

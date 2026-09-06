@@ -1,0 +1,85 @@
+module,signal,gpio,direction,level,default_state,i2c_addr,bus,notes
+LCD,LCD_RST,GPIO22,OUT,high,high,-,GPIO,LCD reset signal
+LCD,LCD_BL,GPIO6,OUT_PWM,high,high,-,GPIO,Backlight PWM (0=off, max=duty 100%)
+LCD,ST7102_MIPI_CLK,internal,-,-,-,-,MIPI,MIPI-DSI 2-lane clock
+LCD,ST7102_MIPI_D0_P,internal,-,-,-,-,MIPI,MIPI-DSI data lane 0+
+LCD,ST7102_MIPI_D0_N,internal,-,-,-,-,MIPI,MIPI-DSI data lane 0-
+LCD,ST7102_MIPI_D1_P,internal,-,-,-,-,MIPI,MIPI-DSI data lane 1+
+LCD,ST7102_MIPI_D1_N,internal,-,-,-,-,MIPI,MIPI-DSI data lane 1-
+Touch,TP_SDA,GPIO7,I2C,-,-,varies,I2C0,Shared I2C bus
+Touch,TP_SCL,GPIO8,I2C,-,-,varies,I2C0,Shared I2C bus
+Touch,TP_INT,GPIO23,IN,low,-,-,GPIO,Touch interrupt
+Audio_ES8311,ES8311_SDA,GPIO7,I2C,-,-,0x18,I2C0,Shared I2C bus
+Audio_ES8311,ES8311_SCL,GPIO8,I2C,-,-,0x18,I2C0,Shared I2C bus
+Audio_ES8311,ES8311_PA_EN,GPIO3,OUT,high,high,-,GPIO,NS4150B PA enable
+Audio_ES8311,I2S_MCLK,GPIO13,OUT,-,-,-,I2S0,Audio master clock
+Audio_ES8311,I2S_BCLK,GPIO12,OUT,-,-,-,I2S0,Audio bit clock
+Audio_ES8311,I2S_WS,GPIO10,OUT,-,-,-,I2S0,Audio word select
+Audio_ES8311,I2S_DOUT,GPIO9,OUT,-,-,-,I2S0,DAC data out
+Audio_ES7210,ES7210_SDA,GPIO7,I2C,-,-,0x40,I2C0,Shared I2C bus
+Audio_ES7210,ES7210_SCL,GPIO8,I2C,-,-,0x40,I2C0,Shared I2C bus
+Audio_ES7210,ES7210_MIC1_P,internal,-,-,-,-,analog,MEMS mic 1+
+Audio_ES7210,ES7210_MIC1_N,internal,-,-,-,-,analog,MEMS mic 1-
+Audio_ES7210,ES7210_MIC2_P,internal,-,-,-,-,analog,MEMS mic 2+
+Audio_ES7210,ES7210_MIC2_N,internal,-,-,-,-,analog,MEMS mic 2-
+Audio_ES7210,ES7210_MIC3_P,internal,-,-,-,-,analog,MEMS mic 3+
+Audio_ES7210,ES7210_MIC3_N,internal,-,-,-,-,analog,MEMS mic 3-
+Audio_ES7210,ES7210_MIC4_P,internal,-,-,-,-,analog,MEMS mic 4+
+Audio_ES7210,ES7210_MIC4_N,internal,-,-,-,-,analog,MEMS mic 4-
+Audio_ES7210,ES7210_I2S_DIN,GPIO11,IN,-,-,0x40,I2S0,ADC data in
+PMIC,AXP2101_SDA,GPIO7,I2C,-,-,0x34,I2C0,Shared I2C bus
+PMIC,AXP2101_SCL,GPIO8,I2C,-,-,0x34,I2C0,Shared I2C bus
+PMIC,AXP2101_DCDC1,internal,OUT,-,3.3V,-,power,Main power rail
+PMIC,AXP2101_ALDO1,internal,OUT,-,1.8V,-,power,Aux rail
+PMIC,AXP2101_ALDO3,internal,OUT,-,3.3V,-,power,Audio codec rail
+PMIC,AXP2101_ALDO4,internal,OUT,-,2.9V,-,power,4G module VBAT
+PMIC,AXP2101_IRQ,internal,IN,-,-,0x34,I2C0,PMIC interrupt
+IMU,LSM6DS_SDA,GPIO7,I2C,-,-,0x6A,I2C0,Shared I2C bus (default)
+IMU,LSM6DS_SCL,GPIO8,I2C,-,-,0x6A,I2C0,Shared I2C bus (default)
+IMU,LSM6DS_INT1,internal,IN,-,-,-,GPIO,IMU interrupt (not connected per schematic)
+IMU,LSM6DS_INT2,internal,IN,-,-,-,GPIO,IMU interrupt (not connected per schematic)
+DAC,MCP4725_SDA,GPIO7,I2C,-,-,0x60,I2C0,Shared I2C bus
+DAC,MCP4725_SCL,GPIO8,I2C,-,-,0x60,I2C0,Shared I2C bus
+DAC,MCP4725_OUT,internal,OUT,-,-,-,analog,DAC analog output
+LED,BUILTIN_LED,GPIO34,OUT,low,low,-,GPIO,Single-color status LED
+LED,WS2812_DAT,GPIO21,OUT,-,-,-,GPIO,WS2812 RGB LED data (RMT)
+USB_UART,CH343P_ESP_TX,GPIO37,IN,-,-,-,UART0,CH343P RX <- P4 TX
+USB_UART,CH343P_ESP_RX,GPIO4,OUT,-,-,-,UART0,CH343P TX -> P4 RX (conflict with 4G POWER)
+USB_UART,CH343P_BOOTMODE,GPIO35,OUT,-,-,-,GPIO,Auto-download mode control
+USB_OTG,USB_DP,internal,-,-,-,-,USB,USB OTG D+
+USB_OTG,USB_DM,internal,-,-,-,-,USB,USB OTG D-
+USB_OTG,USB_VBUS,GPIO50,IN,-,-,-,GPIO,VBUS insertion detect
+4G_ML307C,ML307_TX,GPIO53,OUT_UART,-,-,-,UART,AT command TX
+4G_ML307C,ML307_RX,GPIO52,IN_UART,-,-,-,UART,AT response RX
+4G_ML307C,ML307_POWER_EN,GPIO4,OUT,high,high,-,GPIO,4G module power enable
+4G_ML307C,ML307_DTR,GPIO51,OUT,-,-,-,GPIO,Sleep control
+4G_ML307C,ML307_VBAT,internal,IN,-,2.9V,-,power,Powered by AXP2101 ALDO4
+4G_ML307C,SIM_DATA,internal,-,-,-,-,SIM,SIM card data
+4G_ML307C,SIM_CLK,internal,-,-,-,-,SIM,SIM card clock
+4G_ML307C,SIM_RST,internal,-,-,-,-,SIM,SIM card reset
+4G_ML307C,SIM_VDD,internal,OUT,-,-,-,SIM,SIM card power
+4G_ML307C,USIM_DET,internal,IN,-,-,-,GPIO,SIM insertion detect
+SD_CARD,SD_DATA0,internal,-,-,-,-,SDMMC,SD card data 0
+SD_CARD,SD_DATA1,internal,-,-,-,-,SDMMC,SD card data 1
+SD_CARD,SD_DATA2,internal,-,-,-,-,SDMMC,SD card data 2
+SD_CARD,SD_DATA3,internal,-,-,-,-,SDMMC,SD card data 3
+SD_CARD,SD_CMD,internal,-,-,-,-,SDMMC,SD card command
+SD_CARD,SD_CLK,internal,-,-,-,-,SDMMC,SD card clock
+CAMERA_MIPI_CSI,MIPI_CSI_CLK_P,internal,-,-,-,-,MIPI,MIPI-CSI clock+
+CAMERA_MIPI_CSI,MIPI_CSI_CLK_N,internal,-,-,-,-,MIPI,MIPI-CSI clock-
+CAMERA_MIPI_CSI,MIPI_CSI_D0_P,internal,-,-,-,-,MIPI,MIPI-CSI data 0+
+CAMERA_MIPI_CSI,MIPI_CSI_D0_N,internal,-,-,-,-,MIPI,MIPI-CSI data 0-
+CAMERA_MIPI_CSI,MIPI_CSI_D1_P,internal,-,-,-,-,MIPI,MIPI-CSI data 1+
+CAMERA_MIPI_CSI,MIPI_CSI_D1_N,internal,-,-,-,-,MIPI,MIPI-CSI data 1-
+CAMERA_MIPI_CSI,CSI_RESET,internal,OUT,-,-,-,GPIO,Camera reset
+CAMERA_MIPI_CSI,CSI_XCLK,internal,OUT,-,-,-,GPIO,Camera master clock
+RS485,RS485_RX,GPIO33,IN_UART,-,-,-,UART,RS485 receive
+RS485,RS485_TX,GPIO31,OUT_UART,-,-,-,UART,RS485 transmit
+RS485,RS485_DE,GPIO32,OUT,low,low,-,GPIO,Driver enable (high = transmit)
+KEY,BOOT_BUTTON,GPIO35,IN,low,-,-,GPIO,Boot button (shared with BOOTMODE)
+KEY,USER_BUTTON,GPIO0,IN,low,-,-,GPIO,User button
+MIPI_PHY,MIPI_DSI_PHY_LDO,internal,OUT,-,2.5V,-,LDO,LDO channel 3
+MIPI_PHY,MIPI_CSI_PHY_LDO,internal,OUT,-,-,LDO,LDO channel 4 (TBD)
+BOOTMODE,C5_BOOT,internal,OUT,-,-,-,GPIO,C5 boot mode control
+WIFI,ESP_HOSTED_CTRL,-,-,-,-,-,SDIO,P4 ↔ C5 communication via SDIO
+WIFI,ESP_HOSTED_DATA,-,-,-,-,-,SDIO,P4 ↔ C5 data via SDIO
