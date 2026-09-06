@@ -1,5 +1,0 @@
-description: 48kHz→16kHz downsampler using ESP-DSP multi-rate FIR (M3 voice uplink)
-version: "0.1.0"
-dependencies:
-  idf: ">=5.4.2"
-  espressif/esp-dsp: "^1.8.2"

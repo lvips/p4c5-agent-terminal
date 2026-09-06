@@ -1,0 +1,4 @@
+description: 24kHz→16kHz linear interpolation resampler (W3 voice uplink)
+version: "0.1.0"
+dependencies:
+  idf: ">=5.5.0"

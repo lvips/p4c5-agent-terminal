@@ -24,6 +24,12 @@ dependencies:
     path: ../components/p4c5_board
   p4c5_audio:
     path: ../components/p4c5_audio
+  audio_mixer:                         # W3: 4ch→1ch 混音
+    path: ../components/audio_pipeline/audio_mixer
+  resampler_24_16:                     # W3: 24kHz→16kHz 重采样
+    path: ../components/audio_pipeline/resampler_24_16
+  opus_encoder:                        # W3: libopus 编码 (16kbps, 20ms 帧)
+    path: ../components/audio_pipeline/opus_encoder
   p4c5_display:
     path: ../components/p4c5_display
   p4c5_pmic:
