@@ -44,6 +44,9 @@ static const char *TAG = "app_main";
 /* W2: 收到的最后一个 tool_call id (用于回 tool_result) */
 static char w2_last_tool_id[64] = {0};
 
+/* W5: assistant_text 累积 buffer (assistant_done 时刷到 p4c5_ui_set_message) */
+static char s_assistant_text_buf[512] = {0};
+
 /* W3: 录音门控 (POC: 串口命令触发, 类似 OMT `s_app_recording`) */
 static volatile bool s_audio_recording = false;
 
@@ -70,10 +73,30 @@ static void on_dsh_frame(const char *frame_type, cJSON *json, void *user_data)
             cJSON *d = cJSON_GetObjectItem(json, "delta");
             if (cJSON_IsString(d)) { printf("%s", d->valuestring); fflush(stdout); }
         }
+        /* W5: 累积文字到 s_assistant_text_buf, assistant_done 时刷新到 UI */
+        const char *text = NULL;
+        cJSON *content_obj = cJSON_GetObjectItem(json, "content");
+        if (cJSON_IsString(content_obj)) text = content_obj->valuestring;
+        else {
+            cJSON *d2 = cJSON_GetObjectItem(json, "delta");
+            if (cJSON_IsString(d2)) text = d2->valuestring;
+        }
+        if (text) {
+            size_t cur_len = strlen(s_assistant_text_buf);
+            size_t add_len = strlen(text);
+            if (cur_len + add_len < sizeof(s_assistant_text_buf) - 1) {
+                strcat(s_assistant_text_buf, text);
+            }
+        }
 
     } else if (strcmp(frame_type, "assistant_done") == 0) {
         printf("\n");
-        ESP_LOGI(TAG, "📝 [down] assistant_done");
+        ESP_LOGI(TAG, "📝 [down] assistant_done (%u bytes)", strlen(s_assistant_text_buf));
+        /* W5: 调 p4c5_ui_set_message 把累积文字推到屏幕 */
+        if (strlen(s_assistant_text_buf) > 0) {
+            p4c5_ui_set_message(s_assistant_text_buf);
+            s_assistant_text_buf[0] = '\0';  // reset for next assistant turn
+        }
 
     } else if (strcmp(frame_type, "tool_call") == 0) {
         cJSON *name = cJSON_GetObjectItem(json, "tool_name");

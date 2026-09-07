@@ -197,12 +197,15 @@ static void ui_create(void)
     lv_obj_set_style_bg_color(s_lbl_msg, COL_MSG_BG, 0);
     lv_obj_set_style_bg_opa(s_lbl_msg, LV_OPA_COVER, 0);
     lv_obj_set_style_pad_all(s_lbl_msg, 12, 0);
-    lv_obj_set_style_border_width(s_lbl_msg, 1, 0);
-    lv_obj_set_style_border_color(s_lbl_msg, lv_color_hex(0x444444), 0);
+    lv_obj_set_style_border_width(s_lbl_msg, 2, 0);  /* W5: 加粗边框 */
+    lv_obj_set_style_border_color(s_lbl_msg, lv_color_hex(0x00AAFF), 0);  /* W5: 亮蓝边框 */
     lv_obj_set_style_radius(s_lbl_msg, 8, 0);
+    lv_obj_set_style_text_color(s_lbl_msg, lv_color_hex(0xFFFFFF), 0);  /* W5: 强制白文字 */
     lv_obj_set_size(s_lbl_msg, UI_WIDTH - 40, 260);
     lv_label_set_long_mode(s_lbl_msg, LV_LABEL_LONG_WRAP);
     lv_obj_align(s_lbl_msg, LV_ALIGN_TOP_LEFT, 20, 170);
+    ESP_LOGI(TAG, "📋 msg label: pos=(20,170) size=(%d,260) (set_message OK)",
+             UI_WIDTH - 40);
 
     /* 分隔线 */
     lv_obj_t *sep2 = lv_obj_create(scr);
@@ -232,6 +235,9 @@ static void ui_create(void)
     lv_obj_align(s_lbl_status, LV_ALIGN_BOTTOM_MID, 0, -30);
 
     ESP_LOGI(TAG, "UI created: title/bat/4g/dsh/msg/btn/status");
+
+    /* W5: 启动后立即设测试文字, 验证 LVGL msg label 渲染是否工作 */
+    p4c5_ui_set_message("[W5 INIT] Hello, this is a test message");
 }
 
 /* ════════════════════════════════════════════════════════════════
@@ -293,14 +299,22 @@ void p4c5_ui_unlock(void)
 
 void p4c5_ui_set_message(const char *text)
 {
-    if (!s_lbl_msg) return;
+    ESP_LOGI(TAG, "📝 [UI] set_message: text_len=%d, s_lbl_msg=%p",
+             text ? strlen(text) : 0, s_lbl_msg);
+    if (!s_lbl_msg) {
+        ESP_LOGE(TAG, "📝 [UI] s_lbl_msg is NULL!");
+        return;
+    }
     p4c5_ui_lock();
     if (text) {
         char buf[512];
         snprintf(buf, sizeof(buf), "Last Assistant:\n  %s", text);
+        ESP_LOGI(TAG, "📝 [UI] setting label: %s", buf);
         lv_label_set_text(s_lbl_msg, buf);
+        lv_obj_invalidate(s_lbl_msg);  /* W5: 强制 LVGL 重绘此 widget */
     } else {
         lv_label_set_text(s_lbl_msg, "Last Assistant:\n  (no message yet)");
+        lv_obj_invalidate(s_lbl_msg);
     }
     p4c5_ui_unlock();
 }
