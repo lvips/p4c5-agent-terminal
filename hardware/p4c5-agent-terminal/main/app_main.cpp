@@ -346,7 +346,7 @@ static void audio_uplink_task(void *arg)
 
     ESP_LOGI("audio_uplink", "P1 音频上行链路启动 (ESP-SR AFE + WakeNet9)");
     ESP_LOGI("audio_uplink", "  4ch@24kHz TDM (ch0=mic, ch1=AEC_ref, ch2/ch3=unused)");
-    ESP_LOGI("audio_uplink", "  → ch0+ch1 提取 (2ch) → 24k→16k resample (1536→1024)");
+    ESP_LOGI("audio_uplink", "  → ch0+ch2 提取 (MIC1 mic + MIC3 ref, 官方方案) → 24k→16k resample");
     ESP_LOGI("audio_uplink", "  → ESP-SR AFE (AEC + NS + VAD 神经网络) → 16k mono");
     ESP_LOGI("audio_uplink", "  → opus → WS Binary 上行");
     ESP_LOGI("audio_uplink", "触发方式:");
@@ -395,13 +395,14 @@ static void audio_uplink_task(void *arg)
             continue;
         }
 
-        /* 2. P1: 通道提取 ch0 (mic) + ch1 (ref) → 2ch 24kHz 1536 samples
+        /* 2. P1 官方方案: 通道提取 ch0 (MIC1 mic) + ch2 (MIC3 ref) → 2ch 24kHz
+         *    跟 p4c5_board_test 一致: MIC1 主麦 + MIC3 AEC ref
          *    TDM 帧布局: [ch0_s0, ch1_s0, ch2_s0, ch3_s0, ch0_s1, ch1_s1, ...] */
         for (size_t i = 0; i < FRAME_SAMPLES_24K; i++) {
-            int16_t mic_s = s_in4ch_buf[i * 4 + 0];   /* ch0 = mic */
-            int16_t ref_s = s_in4ch_buf[i * 4 + 1];   /* ch1 = AEC ref */
-            s_2ch_16k_buf[i * 2 + 0] = mic_s;          /* mic (interleaved, 2ch) */
-            s_2ch_16k_buf[i * 2 + 1] = ref_s;          /* ref */
+            int16_t mic_s = s_in4ch_buf[i * 4 + 0];   /* ch0 = MIC1 主麦 */
+            int16_t ref_s = s_in4ch_buf[i * 4 + 2];   /* ch2 = MIC3 ref (官方) */
+            s_2ch_16k_buf[i * 2 + 0] = mic_s;
+            s_2ch_16k_buf[i * 2 + 1] = ref_s;
         }
 
         /* 3. P1: 24kHz → 16kHz 重采样 (1536 → 1024 samples, 线性插值)
@@ -524,13 +525,36 @@ static void audio_uplink_task(void *arg)
                 }
                 return x;
             };
-            uint32_t mic_rms = calc_rms(s_in4ch_buf, FRAME_SAMPLES_24K * 4);
+
+            /* W7 mic 诊断: 每个 channel 单独算 RMS + peak, 找出有声音的通道
+             * TDM layout: [ch0_s0, ch1_s0, ch2_s0, ch3_s0, ch0_s1, ...] */
+            uint32_t ch_rms[4] = {0};
+            int16_t  ch_peak[4] = {0};
+            for (int ch = 0; ch < 4; ch++) {
+                uint64_t sum_sq = 0;
+                int16_t peak = 0;
+                for (size_t i = 0; i < FRAME_SAMPLES_24K; i++) {
+                    int16_t v = s_in4ch_buf[i * 4 + ch];
+                    sum_sq += (uint64_t)(v * v);
+                    if (abs(v) > abs(peak)) peak = v;
+                }
+                uint32_t mean = (uint32_t)(sum_sq / FRAME_SAMPLES_24K);
+                uint32_t x = mean, y = (x + 1) >> 1;
+                while (y < x) { x = y; y = (x + mean / x) >> 1; }
+                ch_rms[ch] = x;
+                ch_peak[ch] = peak;
+            }
             uint32_t out_rms = calc_rms(s_out_16k_mono, out_samples);
             ESP_LOGI("audio_diag",
-                     "frame=%llu mic4ch=%u out16k=%u VAD=%s "
-                     "(P1: ESP-SR AFE AEC/NS/VAD 全开)",
+                     "frame=%llu ch[0]rms=%u peak=%d | ch[1]rms=%u peak=%d | "
+                     "ch[2]rms=%u peak=%d | ch[3]rms=%u peak=%d | "
+                     "out16k=%u VAD=%s",
                      (unsigned long long)frame_count,
-                     (unsigned)mic_rms, (unsigned)out_rms,
+                     (unsigned)ch_rms[0], (int)ch_peak[0],
+                     (unsigned)ch_rms[1], (int)ch_peak[1],
+                     (unsigned)ch_rms[2], (int)ch_peak[2],
+                     (unsigned)ch_rms[3], (int)ch_peak[3],
+                     (unsigned)out_rms,
                      vad_state == AFE_VAD_SPEECH_P4 ? "SPEECH" : "SILENCE");
         }
     }

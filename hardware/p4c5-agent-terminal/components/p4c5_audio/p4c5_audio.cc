@@ -64,7 +64,7 @@ static bool                         s_input_enabled = false;
 static bool                         s_output_enabled = false;
 static int                          s_input_sample_rate  = P4C5_AUDIO_SAMPLE_RATE;
 static int                          s_output_sample_rate = P4C5_AUDIO_SAMPLE_RATE;
-static int                          s_input_gain    = 30;  /* dB, 与 xiaozhi 一致 */
+static int                          s_input_gain    = 37;  /* dB (P1: 30→37, ES7210 max 37.5) */
 static int                          s_output_volume = 60;  /* 0-100 */
 
 /* ──────────────────────────────────────────────
@@ -283,8 +283,9 @@ esp_err_t p4c5_audio_init(void)
 
         es7210_codec_cfg_t es7210_cfg = {};
         es7210_cfg.ctrl_if = s_in_ctrl_if;
-        es7210_cfg.mic_selected = ES7210_SEL_MIC1 | ES7210_SEL_MIC2 |
-                                   ES7210_SEL_MIC3 | ES7210_SEL_MIC4;
+        /* 官方方案 (与 p4c5_board_test 一致): MIC1 主麦 + MIC3 ref
+         *  不再选 MIC2/MIC4 (这俩在 P4C5 板上未启用) */
+        es7210_cfg.mic_selected = ES7210_SEL_MIC1 | ES7210_SEL_MIC3;
         s_in_codec_if = es7210_codec_new(&es7210_cfg);
         ESP_RETURN_ON_FALSE(s_in_codec_if != NULL, ESP_ERR_NO_MEM, TAG,
                             "es7210_codec_new failed");
@@ -301,6 +302,42 @@ esp_err_t p4c5_audio_init(void)
     ESP_LOGI(TAG, "ES7210 ADC initialized (addr=0x%02X, 4mic%s)",
              P4C5_ES7210_I2C_ADDR,
              P4C5_AUDIO_INPUT_REF ? " + AEC ref" : "");
+
+    /* W7 诊断: dump ES7210 关键寄存器, 验证 mic bias + power + gain */
+    {
+        /* 通过 ctrl_if 读寄存器 (8-bit addr, 8-bit value) */
+        uint8_t regs[][2] = {
+            /* addr, label */
+            {0x01, 0x00},   /* CLOCK_OFF_REG01 */
+            {0x07, 0x00},   /* OSR_REG07 */
+            {0x08, 0x00},   /* MODE_CONFIG_REG08 */
+            {0x40, 0x00},   /* ANALOG_REG40 */
+            {0x41, 0x00},   /* MIC12_BIAS_REG41 */
+            {0x42, 0x00},   /* MIC34_BIAS_REG42 */
+            {0x43, 0x00},   /* MIC1_GAIN_REG43 */
+            {0x44, 0x00},   /* MIC2_GAIN_REG44 */
+            {0x45, 0x00},   /* MIC3_GAIN_REG45 */
+            {0x46, 0x00},   /* MIC4_GAIN_REG46 */
+            {0x4B, 0x00},   /* MIC12_POWER_REG4B */
+            {0x4C, 0x00},   /* MIC34_POWER_REG4C */
+        };
+        const char* labels[] = {
+            "CLOCK_OFF", "OSR", "MODE_CFG", "ANALOG",
+            "MIC12_BIAS", "MIC34_BIAS",
+            "MIC1_GAIN", "MIC2_GAIN", "MIC3_GAIN", "MIC4_GAIN",
+            "MIC12_POWER", "MIC34_POWER"
+        };
+        ESP_LOGI(TAG, "─── ES7210 register dump ───");
+        for (int i = 0; i < sizeof(regs)/sizeof(regs[0]); i++) {
+            uint8_t val = 0;
+            if (s_in_ctrl_if && s_in_ctrl_if->read_reg) {
+                s_in_ctrl_if->read_reg(s_in_ctrl_if, regs[i][0], 1, &val, 1);
+            }
+            ESP_LOGI(TAG, "  REG 0x%02X %-12s = 0x%02X",
+                     regs[i][0], labels[i], val);
+        }
+        ESP_LOGI(TAG, "─────────────────────────────");
+    }
 
     s_initialized = true;
     /* 对应测试 TC-01 / TC-02：日志输出 init 完成 */
