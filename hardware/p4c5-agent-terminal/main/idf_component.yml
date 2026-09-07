@@ -24,18 +24,22 @@ dependencies:
     path: ../components/p4c5_board
   p4c5_audio:
     path: ../components/p4c5_audio
-  audio_mixer:                         # W3: 4ch→1ch 混音
+  audio_mixer:                         # W3: 4ch→1ch 混音 (P1: AFE 直接吃 4ch, mixer 可废弃)
     path: ../components/audio_pipeline/audio_mixer
-  aec_sw:                              # W3: 软件 AEC 回声消除 (NLMS)
+  aec_sw:                              # W3: 软件 AEC 回声消除 (NLMS, P1 由 ESP-SR AEC 替换)
     path: ../components/audio_pipeline/aec_sw
-  resampler_24_16:                     # W3: 24kHz→16kHz 重采样
+  resampler_24_16:                     # W3: 24kHz→16kHz 重采样 (P1 由 ESP-SR AFE 内部完成)
     path: ../components/audio_pipeline/resampler_24_16
   opus_encoder:                        # W3: libopus 编码 (16kbps, 20ms 帧)
     path: ../components/audio_pipeline/opus_encoder
   tts_player:                          # W3: TTS 下行 PCM 播放 (WS Binary → ES8311 DAC)
     path: ../components/audio_pipeline/tts_player
-  wake_word_detector:                  # W4: P4 自实现 RMS-based 唤醒检测 (无 ESP-SR AFE)
+  wake_word_detector:                  # W4: P4 自实现 RMS-based 唤醒 (P1 由 WakeNet9 替换)
     path: ../components/audio_pipeline/wake_word_detector
+  audio_afe_processor:                 # P1: ESP-SR AFE (AEC + NS + VAD 神经网络)
+    path: ../components/audio_pipeline/audio_afe_processor
+  audio_wake_word:                     # P1: ESP-SR WakeNet9 唤醒词检测
+    path: ../components/audio_pipeline/audio_wake_word
   p4c5_display:
     path: ../components/p4c5_display
   p4c5_pmic:
