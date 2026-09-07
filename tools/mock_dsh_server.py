@@ -26,8 +26,11 @@ import time
 import uuid
 import argparse
 import logging
+import os
 import sys
 from datetime import datetime
+from pathlib import Path
+from typing import Optional
 
 try:
     import websockets
@@ -46,11 +49,26 @@ except ImportError:
     print("  pip install websockets")
     sys.exit(1)
 
+# W4: ASR Backend (1:1 OMT port, 见 tools/p4c5_asr_adapter.py)
+sys.path.insert(0, str(Path(__file__).parent))
+try:
+    from p4c5_asr_adapter import (
+        ASREngine, MockASREngine, NLSASREngine,
+        OpusDecoder, MockOpusDecoder,
+        VADSession, SAMPLE_RATE, CHANNELS,
+    )
+    HAS_ASR_ADAPTER = True
+except ImportError as e:
+    HAS_ASR_ADAPTER = False
+    print(f"⚠️  p4c5_asr_adapter 导入失败: {e}")
+    print("   ASR Backend 将不可用, 仅使用内嵌 Mock")
+
 # ── 日志配置 ──
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(levelname)s] %(message)s',
-    datefmt='%H:%M:%S'
+    datefmt='%H:%M:%S',
+    force=True,  # 覆盖 urllib3 等第三方库可能已调 basicConfig 设的 handler
 )
 logger = logging.getLogger('mock-dsh')
 
@@ -97,9 +115,29 @@ class MockSession:
 
 
 class MockDshServer:
+
+    @staticmethod
+    def _make_default_asr_engine():
+        """根据环境变量自动选 backend
+
+        ALIYUN_ACCESS_KEY_ID / ALIYUN_ACCESS_KEY_SECRET / ALIYUN_NLS_APPKEY
+        三个都设了 → 阿里云 NLS ISI (REST, 1:1 OMT port)
+        否则 → Mock
+        """
+        ak_id = os.environ.get("ALIYUN_ACCESS_KEY_ID")
+        ak_secret = os.environ.get("ALIYUN_ACCESS_KEY_SECRET")
+        appkey = os.environ.get("ALIYUN_NLS_APPKEY")
+        if ak_id and ak_secret and appkey:
+            logger.info(f"🔑 检测到 ALIYUN_NLS 凭证 → 用 NLSASREngine (REST, appkey={appkey[:6]}...)")
+            return NLSASREngine(ak_id, ak_secret, appkey)
+        logger.info("🎭 无 ALIYUN_NLS 凭证 → 用 MockASREngine")
+        return MockASREngine()
+
     """Mock DSH WebSocket 服务端"""
 
-    def __init__(self, host='0.0.0.0', port=8765):
+    def __init__(self, host='0.0.0.0', port=8765,
+                 asr_engine: Optional[ASREngine] = None,
+                 use_opus_decoder: bool = True):
         self.host = host
         self.port = port
         self.sessions = {}  # ws → MockSession
@@ -109,6 +147,32 @@ class MockDshServer:
         self.disconnect_after_n_heartbeats = 0  # N 次心跳后断开（0=不断）
         self.heartbeat_count = {}  # ws → count
         self.broadcast_text = False  # W3: 是否把 assistant_text 广播给所有客户端 (供 TTS Adapter 订阅)
+
+        # ── W4: ASR Backend ──
+        # 默认 backend 由环境变量选择:
+        #   ALIYUN_ACCESS_KEY_ID/SECRET + ALIYUN_NLS_APPKEY → NLSASREngine (真阿里云)
+        #   否则 → MockASREngine (内嵌 fallback)
+        # 也可显式传入 asr_engine 覆盖
+        if asr_engine is None and HAS_ASR_ADAPTER:
+            asr_engine = self._make_default_asr_engine()
+        self.asr_engine = asr_engine
+        self.use_opus_decoder = use_opus_decoder and HAS_ASR_ADAPTER
+
+        # OPUS 解码器 (用于 ASR backend)
+        if self.use_opus_decoder:
+            try:
+                self.opus_decoder = OpusDecoder(SAMPLE_RATE, CHANNELS)
+                logger.info("🎧 OPUS 解码器: libopus (opuslib)")
+            except Exception:
+                self.opus_decoder = MockOpusDecoder()
+                logger.info("🎧 OPUS 解码器: Mock (opuslib 未装)")
+        else:
+            self.opus_decoder = None
+
+        if self.asr_engine:
+            logger.info(f"🎯 ASR backend: {type(self.asr_engine).__name__}")
+        else:
+            logger.info("🎯 ASR backend: 内嵌 Mock (没装 adapter)")
 
     async def handle_client(self, ws):
         """处理单个客户端连接"""
@@ -413,86 +477,114 @@ class MockDshServer:
         logger.info(f"📦 发送 Binary: {len(data)} bytes")
 
     async def _handle_audio_binary(self, ws, session, opus_frame: bytes):
-        """W3: 处理 P4C5 上行的 OPUS 音频帧 (WS Binary)
+        """W4: 处理 P4C5 上行的 OPUS 音频帧 (WS Binary)
 
-        设计 (POC 阶段, Mock ASR):
-          - 累计收到的 OPUS 字节数 (代替真实 ASR)
-          - 当累计超过 VAD_END_HOLD_MS 持续无新帧 OR 收到 audio 控制帧 (action=end)
-            时触发"识别"完成
-          - "识别"结果: 直接把累计字节数 + 时长包装成识别文字
-          - 然后用这条文字作为 user_input 上行到 mock LLM, 触发完整 18 帧对话流
+        完整链路 (vs W3 POC):
+          1. 解码 OPUS → PCM Int16 (libopus / MockOpusDecoder)
+          2. VAD 检测 (RMS 80/50, 900ms 静音, 20s 硬截止)
+          3. 触发 ASR (MockASREngine / NLSASREngine 阿里云 NLS ISI)
+          4. 用识别文字作为 user_input 上行, 触发 mock LLM 对话流
 
-        简化:
-          - 不做真实 OPUS 解码 (POC 阶段)
-          - 不做真实 VAD (按帧累积, 5s 超时强制触发)
-          - 不调阿里云 ISI (避免需要 access key)
-
-        完整版 (后续):
-          - 用 opuslib 解码 → PCM
-          - VAD RMS 检测静音
-          - 阿里云 DashScope 流式 ASR
+        VAD 状态机复刻 OMT asr.js (1:1):
+          - rmsOfInt16() 整数平方根
+          - silence_started_at 时间戳 (不是 frame count)
+          - 同一会话共享 PCM chunks, finalize 后 reset
         """
-        if not hasattr(session, 'audio_buf'):
-            session.audio_buf = []
-            session.audio_bytes = 0
-            session.audio_started_at = time.time()
+        # 懒初始化 session 字段
+        if not hasattr(session, 'vad_session'):
+            session.vad_session = VADSession(
+                asr=self.asr_engine,
+                on_text=lambda text: self._on_asr_text(ws, session, text),
+            ) if self.asr_engine else None
             session.audio_frames = 0
+            session.audio_bytes = 0
 
-        session.audio_buf.append(opus_frame)
-        session.audio_bytes += len(opus_frame)
         session.audio_frames += 1
+        session.audio_bytes += len(opus_frame)
 
-        # 日志 (每 50 帧打印一次, 避免刷屏)
-        if session.audio_frames % 50 == 1:
-            elapsed = time.time() - session.audio_started_at
-            logger.info(f"🎤 [audio] frame #{session.audio_frames} "
-                        f"len={len(opus_frame)} bytes, "
-                        f"total={session.audio_bytes} bytes, "
-                        f"elapsed={elapsed:.1f}s")
-
-        # VAD_END_HOLD_MS 等价: 收到 100 帧即触发 (POC 简化, 模拟"按住语音键松手")
-        # 实际生产: 需要 P4C5 发 audio 控制帧 action=end
-        if session.audio_frames >= 100:
-            await self._mock_asr_finalize(ws, session)
+        if not self.use_opus_decoder or not session.vad_session:
+            # W3 fallback: 累计 100 帧就触发 (无 opus decoder / 无 backend)
+            if session.audio_frames % 50 == 1:
+                logger.info(f"🎤 [audio-frames-only] frame #{session.audio_frames} "
+                            f"len={len(opus_frame)}, total={session.audio_bytes}")
+            if session.audio_frames >= 100:
+                await self._mock_asr_finalize(ws, session)
             return
 
-    async def _mock_asr_finalize(self, ws, session):
-        """POC: 模拟 ASR 识别完成, 上行 user_input 触发完整对话流"""
-        duration = time.time() - session.audio_started_at
-        opus_kbps_est = (session.audio_bytes * 8 / 1024) / duration if duration > 0 else 0
+        # 1. OPUS → PCM
+        try:
+            pcm_int16 = self.opus_decoder.decode(opus_frame)
+        except Exception as e:
+            logger.warning(f"opus decode 失败: {e}")
+            return
 
-        # 模拟 ASR 识别结果 (POC 阶段, 不做真实解码)
-        recognized_text = (
-            f"[Mock-ASR] 收到 {session.audio_bytes} bytes OPUS, "
-            f"{session.audio_frames} 帧, {duration:.1f}s, "
-            f"约 {opus_kbps_est:.1f} kbps"
-        )
+        # 2. VAD 累积 + 触发 ASR
+        await session.vad_session.feed(pcm_int16, time.time())
 
-        logger.info(f"🎯 [mock-asr] 识别完成: \"{recognized_text}\"")
+        # 日志
+        if session.vad_session.frames % 50 == 1:
+            elapsed = (time.time() - (session.vad_session.session_start_at or time.time()))
+            logger.info(f"🎤 [vad] frames={session.vad_session.frames} "
+                        f"samples={session.vad_session.samples} "
+                        f"speech_started={session.vad_session.speech_started} "
+                        f"elapsed={elapsed:.1f}s")
+
+    async def _on_asr_text(self, ws, session, recognized_text: str):
+        """ASR 完成后被 VADSession 回调"""
+        source = type(self.asr_engine).__name__  # MockASREngine / NLSASREngine
+        duration_ms = int((session.vad_session.samples / 16000) * 1000) if session.vad_session else 0
+        logger.info(f"🎯 [{source}] 识别完成: \"{recognized_text}\" ({duration_ms}ms)")
         logger.info(f"   ↑ 上行 user_input → 触发 mock LLM 完整对话流")
 
-        # 重置 buffer (避免重复触发)
-        session.audio_buf = []
-        session.audio_bytes = 0
-        session.audio_frames = 0
-        session.audio_started_at = time.time()
-
-        # ★ 用识别文字作为 user_input 上行, 让 mock LLM 完整对话流跑起来
+        # ★ 用识别文字作为 user_input 上行
         await ws.send(json.dumps(make_frame(
             "client/user_input",
             session_id=session.session_id,
             text=recognized_text,
-            source="mock_asr",
-            duration_ms=int(duration * 1000),
+            source=source.lower(),
+            duration_ms=duration_ms,
         )))
 
         # 等待 mock LLM 处理
         await asyncio.sleep(0.5)
 
-        # ★ 触发 mock LLM 完整对话流 (复用 _handle_user_input 内部逻辑)
+        # ★ 触发 mock LLM 完整对话流
         await self._handle_user_input(ws, session, {
             'text': recognized_text,
-            'source': 'mock_asr',
+            'source': source.lower(),
+        })
+
+        # 重置 VAD session 准备下一段语音
+        session.vad_session.reset()
+
+    async def _mock_asr_finalize(self, ws, session):
+        """W3 fallback: 无 OPUS decoder / 无 backend 时, 累计帧数触发"""
+        duration = session.audio_frames * 0.020  # 20ms 帧
+        opus_kbps_est = (session.audio_bytes * 8 / 1024) / duration if duration > 0 else 0
+
+        recognized_text = (
+            f"[W3-Mock-ASR] 收到 {session.audio_bytes} bytes OPUS, "
+            f"{session.audio_frames} 帧, {duration:.1f}s, "
+            f"约 {opus_kbps_est:.1f} kbps"
+        )
+
+        logger.info(f"🎯 [w3-mock] 识别完成: \"{recognized_text}\"")
+
+        session.audio_frames = 0
+        session.audio_bytes = 0
+
+        await ws.send(json.dumps(make_frame(
+            "client/user_input",
+            session_id=session.session_id,
+            text=recognized_text,
+            source="w3_mock_asr",
+            duration_ms=int(duration * 1000),
+        )))
+
+        await asyncio.sleep(0.5)
+        await self._handle_user_input(ws, session, {
+            'text': recognized_text,
+            'source': 'w3_mock_asr',
         })
 
     def _truncate(self, data, max_len=80):
@@ -601,6 +693,10 @@ def main():
     server.simulate_large_frame = args.large_frame
     server.disconnect_after_n_heartbeats = args.disconnect_after
     server.broadcast_text = args.broadcast_text
+
+    # W4: 显示 backend 选择结果
+    logger.info(f"🎯 ASR backend: {type(server.asr_engine).__name__}")
+    logger.info(f"🎧 OPUS decoder: {type(server.opus_decoder).__name__ if server.opus_decoder else 'None'}")
 
     try:
         asyncio.run(server.run())
