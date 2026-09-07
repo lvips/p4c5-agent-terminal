@@ -12,7 +12,7 @@
 #   - p4c5_pmic / p4c5_4g / dsh_client: status sources for UI update
 
 idf_component_register(
-    SRCS "p4c5_ui.c"
+    SRCS "p4c5_ui.c" "lv_font_chinese_16.c"
     INCLUDE_DIRS "."
     REQUIRES
         lvgl

@@ -28,9 +28,14 @@
 
 #include "p4c5_ui.h"
 
+#include "lvgl.h"  /* W5: 先 include 让 lv_font_t 类型可见 */
 #include "p4c5_board.h"
 #include "p4c5_display.h"
 #include "p4c5_pmic.h"
+
+/* W5: 中文字体 (从 OMT 项目复制 lv_font_chinese_16.c, 思源黑体 16px 包含 ASCII + CJK) */
+extern const lv_font_t lv_font_chinese_16;
+#define FONT_CN &lv_font_chinese_16
 // #include "p4c5_4g.h"  // W1: 4G 搁置 (需电池)
 #include "dsh_client.h"
 #include "config.h"
@@ -96,7 +101,7 @@ static void btn_talk_event_cb(lv_event_t *e)
         ESP_LOGI(TAG, "👆 [TALK] PRESSED at (%d, %d)", p.x, p.y);
         /* UI 视觉反馈: 立即变红 + status 文字 */
         if (s_lbl_status) {
-            lv_label_set_text(s_lbl_status, "Status: Listening...");
+            lv_label_set_text(s_lbl_status, "状态: 录音中...");
             lv_obj_set_style_text_color(s_lbl_status, lv_color_hex(0x00FF00), 0);  /* 鲜绿 */
         }
         if (s_btn_talk) {
@@ -113,7 +118,7 @@ static void btn_talk_event_cb(lv_event_t *e)
         lv_indev_get_point(lv_indev_active(), &p);
         ESP_LOGI(TAG, "👆 [TALK] RELEASED at (%d, %d)", p.x, p.y);
         if (s_lbl_status) {
-            lv_label_set_text(s_lbl_status, "Status: Processing...");
+            lv_label_set_text(s_lbl_status, "状态: 处理中...");
             lv_obj_set_style_text_color(s_lbl_status, lv_color_hex(0xFF8800), 0);  /* 橙 */
         }
         if (s_btn_talk) {
@@ -167,6 +172,7 @@ static void ui_create(void)
     /* ── 标题栏 (y: 0-50) ── */
     lv_obj_t *lbl_title = lv_label_create(scr);
     lv_label_set_text(lbl_title, "p4c5-agent-terminal  v" P4C5_BOARD_VERSION);
+    lv_obj_set_style_text_font(lbl_title, FONT_CN, 0);  /* W5: 中文字体 */
     lv_obj_set_style_text_color(lbl_title, COL_ACCENT, 0);
     lv_obj_align(lbl_title, LV_ALIGN_TOP_MID, 0, 15);
 
@@ -180,20 +186,24 @@ static void ui_create(void)
 
     /* ── 状态区 (y: 60-180) ── */
     s_lbl_bat = lv_label_create(scr);
-    lv_label_set_text(s_lbl_bat, "Battery: --- %");
+    lv_label_set_text(s_lbl_bat, "电池: --- %");
+    lv_obj_set_style_text_font(s_lbl_bat, FONT_CN, 0);  /* W5: 中文字体 */
     lv_obj_align(s_lbl_bat, LV_ALIGN_TOP_LEFT, 20, 65);
 
     s_lbl_4g = lv_label_create(scr);
     lv_label_set_text(s_lbl_4g, "4G:  --- dBm  (init)");
+    lv_obj_set_style_text_font(s_lbl_4g, FONT_CN, 0);  /* W5: 中文字体 */
     lv_obj_align(s_lbl_4g, LV_ALIGN_TOP_LEFT, 20, 95);
 
     s_lbl_dsh = lv_label_create(scr);
-    lv_label_set_text(s_lbl_dsh, "DSH: disconnected");
+    lv_label_set_text(s_lbl_dsh, "DSH: 未连接");
+    lv_obj_set_style_text_font(s_lbl_dsh, FONT_CN, 0);  /* W5: 中文字体 */
     lv_obj_align(s_lbl_dsh, LV_ALIGN_TOP_LEFT, 20, 125);
 
     /* ── 消息区 (y: 170-430) ── */
     s_lbl_msg = lv_label_create(scr);
-    lv_label_set_text(s_lbl_msg, "Last Assistant:\n  (no message yet)");
+    lv_label_set_text(s_lbl_msg, "上次回复:\n  (暂无消息)");
+    lv_obj_set_style_text_font(s_lbl_msg, FONT_CN, 0);  /* W5: 中文字体 (含 CJK + ASCII) */
     lv_obj_set_style_bg_color(s_lbl_msg, COL_MSG_BG, 0);
     lv_obj_set_style_bg_opa(s_lbl_msg, LV_OPA_COVER, 0);
     lv_obj_set_style_pad_all(s_lbl_msg, 12, 0);
@@ -220,17 +230,19 @@ static void ui_create(void)
     lv_obj_set_size(s_btn_talk, 300, 100);
     lv_obj_set_style_bg_color(s_btn_talk, COL_BTN_IDLE, LV_PART_MAIN);
     lv_obj_set_style_radius(s_btn_talk, 16, LV_PART_MAIN);
-    lv_obj_set_style_text_font(s_btn_talk, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_set_style_text_font(s_btn_talk, FONT_CN, LV_PART_MAIN);  /* W5: 中文字体 */
     lv_obj_align(s_btn_talk, LV_ALIGN_BOTTOM_MID, 0, -230);
     lv_obj_add_event_cb(s_btn_talk, btn_talk_event_cb, LV_EVENT_ALL, NULL);
 
     lv_obj_t *lbl_btn = lv_label_create(s_btn_talk);
-    lv_label_set_text(lbl_btn, "Hold to Talk");
+    lv_label_set_text(lbl_btn, "按住说话");
+    lv_obj_set_style_text_font(lbl_btn, FONT_CN, 0);  /* W5: 中文字体 */
     lv_obj_center(lbl_btn);
 
     /* ── 底部状态条 (y: 760-800) ── */
     s_lbl_status = lv_label_create(scr);
-    lv_label_set_text(s_lbl_status, "Status: idle");
+    lv_label_set_text(s_lbl_status, "状态: 空闲");
+    lv_obj_set_style_text_font(s_lbl_status, FONT_CN, 0);  /* W5: 中文字体 */
     lv_obj_set_style_text_color(s_lbl_status, COL_STATUS, 0);
     lv_obj_align(s_lbl_status, LV_ALIGN_BOTTOM_MID, 0, -30);
 
@@ -255,7 +267,7 @@ static void ui_update_task(void *arg)
             /* 电量 */
             if (s_lbl_bat) {
                 uint8_t bat = p4c5_pmic_get_battery_level();
-                snprintf(buf, sizeof(buf), "Battery: %u%%", bat);
+                snprintf(buf, sizeof(buf), "电池: %u%%", bat);
                 lv_label_set_text(s_lbl_bat, buf);
             }
             /* WiFi (W1: 4G 搁置，改用 WiFi) */
@@ -308,12 +320,14 @@ void p4c5_ui_set_message(const char *text)
     p4c5_ui_lock();
     if (text) {
         char buf[512];
-        snprintf(buf, sizeof(buf), "Last Assistant:\n  %s", text);
+        snprintf(buf, sizeof(buf), "上次回复:\n  %s", text);
         ESP_LOGI(TAG, "📝 [UI] setting label: %s", buf);
         lv_label_set_text(s_lbl_msg, buf);
         lv_obj_invalidate(s_lbl_msg);  /* W5: 强制 LVGL 重绘此 widget */
+        /* 不调 lv_refr_now — 会触发 Guru Meditation stack fault (esp_lv_adapter 内部 flush task
+           已经在跑了, 我们只 invalidate 等下个 tick 即可) */
     } else {
-        lv_label_set_text(s_lbl_msg, "Last Assistant:\n  (no message yet)");
+        lv_label_set_text(s_lbl_msg, "上次回复:\n  (暂无消息)");
         lv_obj_invalidate(s_lbl_msg);
     }
     p4c5_ui_unlock();
@@ -325,10 +339,10 @@ void p4c5_ui_set_status(const char *text)
     p4c5_ui_lock();
     if (text) {
         char buf[128];
-        snprintf(buf, sizeof(buf), "Status: %s", text);
+        snprintf(buf, sizeof(buf), "状态: %s", text);
         lv_label_set_text(s_lbl_status, buf);
     } else {
-        lv_label_set_text(s_lbl_status, "Status: idle");
+        lv_label_set_text(s_lbl_status, "状态: 空闲");
     }
     p4c5_ui_unlock();
 }
@@ -398,13 +412,13 @@ esp_err_t p4c5_ui_init(void)
 
     /* 5. UI 控件（adapter lock 内） */
     esp_lv_adapter_lock(-1);
-    /* 设置 LVGL 默认主题（深蓝 + 红强调色） */
+    /* 设置 LVGL 默认主题（深蓝 + 红强调色）, 用中文字体做 base */
     lv_theme_t *theme = lv_theme_default_init(
         s_disp,
         lv_palette_main(LV_PALETTE_BLUE),
         lv_palette_main(LV_PALETTE_RED),
         true,                              /* light mode */
-        &lv_font_montserrat_14);
+        FONT_CN);
     lv_display_set_theme(s_disp, theme);
     ui_create();
     esp_lv_adapter_unlock();
