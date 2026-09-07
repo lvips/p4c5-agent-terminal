@@ -487,6 +487,20 @@ static int cmd_audio_stop(int argc, char **argv)
     return 0;
 }
 
+/* W5: UI 公开 API - 让 p4c5_ui.c 的按钮回调触发 audio_uplink */
+extern "C" void p4c5_ui_btn_talk_press(void)
+{
+    s_audio_recording = true;
+    s_wake_enabled = false;
+    ESP_LOGI(TAG, "🎙 [UI] Hold to Talk PRESSED → audio recording ON");
+}
+
+extern "C" void p4c5_ui_btn_talk_release(void)
+{
+    s_audio_recording = false;
+    ESP_LOGI(TAG, "🎙 [UI] Hold to Talk RELEASED → audio recording OFF");
+}
+
 static int cmd_audio_status(int argc, char **argv)
 {
     ESP_LOGI(TAG, "audio=%s wake=%s",

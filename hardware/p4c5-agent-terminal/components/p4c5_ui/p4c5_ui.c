@@ -88,16 +88,69 @@ static void ui_update_task(void *arg);
 static void btn_talk_event_cb(lv_event_t *e)
 {
     lv_event_code_t code = lv_event_get_code(e);
+    lv_obj_t *btn = lv_event_get_target(e);
     if (code == LV_EVENT_PRESSED) {
-        ESP_LOGI(TAG, "[TALK] pressed");
-        if (s_lbl_status) lv_label_set_text(s_lbl_status, "Status: Listening...");
-        if (s_btn_talk)   lv_obj_set_style_bg_color(s_btn_talk, COL_BTN_LISTEN, LV_PART_MAIN);
-        /* TODO: dsh_client_start_listening() */
+        /* W5: 触摸坐标反馈 (让用户触摸能看到反应) */
+        lv_point_t p;
+        lv_indev_get_point(lv_indev_active(), &p);
+        ESP_LOGI(TAG, "👆 [TALK] PRESSED at (%d, %d)", p.x, p.y);
+        /* UI 视觉反馈: 立即变红 + status 文字 */
+        if (s_lbl_status) {
+            lv_label_set_text(s_lbl_status, "Status: Listening...");
+            lv_obj_set_style_text_color(s_lbl_status, lv_color_hex(0x00FF00), 0);  /* 鲜绿 */
+        }
+        if (s_btn_talk) {
+            /* LVGL 9 button: 必须用 LV_STATE_PRESSED 才能改按下态样式 */
+            lv_obj_set_style_bg_color(s_btn_talk, COL_BTN_LISTEN, LV_STATE_PRESSED);
+            /* 立即改默认样式作为强反馈 (即使 STATE_PRESSED 没生效也能看到) */
+            lv_obj_set_style_bg_color(s_btn_talk, COL_BTN_LISTEN, 0);
+        }
+        /* 触发 audio_uplink (app_main.cpp 暴露的 API) */
+        extern void p4c5_ui_btn_talk_press(void);
+        p4c5_ui_btn_talk_press();
     } else if (code == LV_EVENT_RELEASED) {
-        ESP_LOGI(TAG, "[TALK] released");
-        if (s_lbl_status) lv_label_set_text(s_lbl_status, "Status: Processing...");
-        if (s_btn_talk)   lv_obj_set_style_bg_color(s_btn_talk, COL_BTN_IDLE, LV_PART_MAIN);
-        /* TODO: dsh_client_stop_listening() */
+        lv_point_t p;
+        lv_indev_get_point(lv_indev_active(), &p);
+        ESP_LOGI(TAG, "👆 [TALK] RELEASED at (%d, %d)", p.x, p.y);
+        if (s_lbl_status) {
+            lv_label_set_text(s_lbl_status, "Status: Processing...");
+            lv_obj_set_style_text_color(s_lbl_status, lv_color_hex(0xFF8800), 0);  /* 橙 */
+        }
+        if (s_btn_talk) {
+            lv_obj_set_style_bg_color(s_btn_talk, COL_BTN_IDLE, 0);
+        }
+        extern void p4c5_ui_btn_talk_release(void);
+        p4c5_ui_btn_talk_release();
+    } else if (code == LV_EVENT_CLICKED) {
+        ESP_LOGI(TAG, "🖱 [TALK] CLICKED (PRESSED→RELEASED cycle)");
+    }
+}
+
+/* ════════════════════════════════════════════════════════════════
+ * 全局触摸 debug 回调 - 任何触摸都 ESP_LOGI 坐标 (用于真机测试触摸硬件)
+ * ════════════════════════════════════════════════════════════════ */
+static void touch_indev_event_cb(lv_event_t *e)
+{
+    lv_event_code_t code = lv_event_get_code(e);
+    lv_indev_t *indev = lv_event_get_target(e);
+    if (code == LV_EVENT_INDEV_RESET) {
+        ESP_LOGW(TAG, "🔄 [touch] indev reset");
+        return;
+    }
+    /* LVGL 9.x: indev event_cb 只在 LV_EVENT_INDEV_RESET 触发,
+     * 真正的按下/抬起由 lv_indev_get_state 在 read_cb 后变化触发.
+     * 这里改为 polling indev 状态变化: 由 LVGL task 周期调用 (我们 hook 在 read_cb 上). */
+    static lv_indev_state_t last_state = LV_INDEV_STATE_RELEASED;
+    lv_indev_state_t state = lv_indev_get_state(indev);
+    if (state != last_state) {
+        last_state = state;
+        if (state == LV_INDEV_STATE_PRESSED) {
+            lv_point_t p;
+            lv_indev_get_point(indev, &p);
+            ESP_LOGI(TAG, "👆 [touch] PRESSED at (%d, %d)", p.x, p.y);
+        } else {
+            ESP_LOGI(TAG, "👆 [touch] RELEASED");
+        }
     }
 }
 
@@ -318,6 +371,12 @@ esp_err_t p4c5_ui_init(void)
         }
     } else {
         ESP_LOGW(TAG, "Touch not available; UI will be static");
+    }
+
+    /* 3.5 全局触摸 debug 回调 - 每次触摸都 ESP_LOGI 坐标 (W5 真机测试用) */
+    if (s_touch_in) {
+        lv_indev_add_event_cb(s_touch_in, touch_indev_event_cb, LV_EVENT_ALL, NULL);
+        ESP_LOGI(TAG, "Touch debug event_cb registered (any touch → log)");
     }
 
     /* 4. 启动 adapter 内部 task (tick + timer + flush) */
