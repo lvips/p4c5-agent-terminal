@@ -23,6 +23,8 @@
 #include "dsh_client.h"
 #include "wifi_manager.h"
 #include "audio_mixer.h"           /* W3: 4ch→1ch 混音 (OMT 移植) */
+#include "driver/uart.h"           /* v8 修复: uart_set_pin() */
+#include "driver/gpio.h"           /* v9 诊断: gpio_get_level() */
 #include "aec_sw.h"                /* W3: 软件 AEC 回声消除 (NLMS, P4 自实现) */
 #include "resampler_24_16.h"       /* W3: 24kHz→16kHz 重采样 (适配 p4c5_audio 24kHz) */
 #include "opus_encoder.h"          /* W3: libopus 编码 (16kbps, 20ms 帧) */
@@ -30,6 +32,12 @@
 #include "wake_word_detector.h"    /* W4: P4 自实现 RMS-based 唤醒检测 */
 #include "config.h"
 #include <string.h>
+#include <sys/fcntl.h>
+#include <sys/select.h>
+#include <unistd.h>
+#include "esp_console.h"  /* ESP-IDF 官方 console 组件 (v5.5) */
+#include "driver/uart_vfs.h"  /* uart_vfs_dev_use_driver (v5.5 新 API, 路径 driver/) */
+#include "esp_vfs_dev.h"  /* ESP_LINE_ENDINGS_CR 等常量 (备) */
 
 static const char *TAG = "app_main";
 
@@ -433,35 +441,156 @@ static void audio_uplink_task(void *arg)
     }
 }
 
-/* ── 串口命令处理 (POC: 解析 audio start/stop + wake enable) ── */
+/* ── 串口命令处理 (POC: 解析 audio start/stop + wake enable)
+ *
+ * v2 修复: 改用 ESP-IDF 官方 esp_console 组件
+ *   - 参考: esp-idf-v5.5.5/components/console/esp_console.h
+ *   - 参考: esp-idf-v5.5.5/examples/system/console/basic/main/console_example_main.c
+ *
+ * 之前的 select + fcntl O_NONBLOCK + fgetc 方案不可靠
+ * (VFS UART 默认行缓冲, select 在某些条件下返回 false negative).
+ *
+ * 现在:
+ *   - esp_console_init() 初始化 linenoise + arg parser
+ *   - esp_console_cmd_register() 注册每条命令
+ *   - 主循环读取 UART 行 → esp_console_run() 执行
+ */
+static int cmd_audio_start(int argc, char **argv)
+{
+    s_audio_recording = true;
+    s_wake_enabled = false;  /* 手动模式关掉 wake */
+    ESP_LOGI(TAG, "audio recording ON");
+    return 0;
+}
+
+static int cmd_audio_stop(int argc, char **argv)
+{
+    s_audio_recording = false;
+    ESP_LOGI(TAG, "audio recording OFF");
+    return 0;
+}
+
+static int cmd_audio_status(int argc, char **argv)
+{
+    ESP_LOGI(TAG, "audio=%s wake=%s",
+             s_audio_recording ? "ON" : "OFF",
+             s_wake_enabled ? "EN" : "DIS");
+    return 0;
+}
+
+static int cmd_tts_stats(int argc, char **argv)
+{
+    audio::tts_player_print_stats();
+    return 0;
+}
+
+static int cmd_wake_enable(int argc, char **argv)
+{
+    s_wake_enabled = true;
+    s_audio_recording = false;  /* wake 模式自动控制 */
+    ESP_LOGI(TAG, "wake ENABLED");
+    return 0;
+}
+
+static int cmd_wake_disable(int argc, char **argv)
+{
+    s_wake_enabled = false;
+    ESP_LOGI(TAG, "wake DISABLED");
+    return 0;
+}
+
+static int cmd_wake_status(int argc, char **argv)
+{
+    ESP_LOGI(TAG, "wake=%s audio=%s",
+             s_wake_enabled ? "EN" : "DIS",
+             s_audio_recording ? "ON" : "OFF");
+    audio::wake_word_detector_print_stats();
+    return 0;
+}
+
+/* 注册所有串口命令 (参考 esp_console 官方 API) */
+static void register_uart_commands(void)
+{
+    esp_console_register_help_command();   /* 'help' 命令 */
+
+    const esp_console_cmd_t audio_cmds[] = {
+        {.command = "audio", .help = "Audio subcommands: start/stop/status",
+         .func = NULL, .func_w_context = NULL},  /* 占位 */
+    };
+    (void)audio_cmds;
+
+    /* audio start */
+    const esp_console_cmd_t cmd_a_start = {
+        .command = "audio_start",
+        .help = "Start audio recording (4ch@24k + AEC + opus uplink)",
+        .func = cmd_audio_start,
+    };
+    esp_console_cmd_register(&cmd_a_start);
+
+    /* audio stop */
+    const esp_console_cmd_t cmd_a_stop = {
+        .command = "audio_stop",
+        .help = "Stop audio recording",
+        .func = cmd_audio_stop,
+    };
+    esp_console_cmd_register(&cmd_a_stop);
+
+    /* audio status */
+    const esp_console_cmd_t cmd_a_status = {
+        .command = "audio_status",
+        .help = "Show audio recording / wake state",
+        .func = cmd_audio_status,
+    };
+    esp_console_cmd_register(&cmd_a_status);
+
+    /* tts stats */
+    const esp_console_cmd_t cmd_tts = {
+        .command = "tts_stats",
+        .help = "Show TTS player queue stats",
+        .func = cmd_tts_stats,
+    };
+    esp_console_cmd_register(&cmd_tts);
+
+    /* wake enable */
+    const esp_console_cmd_t cmd_w_enable = {
+        .command = "wake_enable",
+        .help = "Enable W4 wake detection (auto recording on speech)",
+        .func = cmd_wake_enable,
+    };
+    esp_console_cmd_register(&cmd_w_enable);
+
+    /* wake disable */
+    const esp_console_cmd_t cmd_w_disable = {
+        .command = "wake_disable",
+        .help = "Disable W4 wake detection",
+        .func = cmd_wake_disable,
+    };
+    esp_console_cmd_register(&cmd_w_disable);
+
+    /* wake status */
+    const esp_console_cmd_t cmd_w_status = {
+        .command = "wake_status",
+        .help = "Show wake detection state + stats",
+        .func = cmd_wake_status,
+    };
+    esp_console_cmd_register(&cmd_w_status);
+
+    ESP_LOGI(TAG, "UART cmds: audio_/wake_/tts_/help");
+}
+
+/* 兼容旧 API 的 wrapper (保留给将来 debug 用, 当前未调用) */
 static void handle_audio_uart_cmd(const char *line)
 {
-    if (strncmp(line, "audio start", 11) == 0) {
-        s_audio_recording = true;
-        ESP_LOGI(TAG, "🎤 [W3] audio recording ON (4ch@24k + AEC + opus 上行链路启用)");
-    } else if (strncmp(line, "audio stop", 10) == 0) {
-        s_audio_recording = false;
-        ESP_LOGI(TAG, "🔇 [W3] audio recording OFF (上行链路暂停)");
-    } else if (strncmp(line, "audio status", 12) == 0) {
-        ESP_LOGI(TAG, "🎤 [W3] audio recording = %s, wake = %s",
-                 s_audio_recording ? "ON" : "OFF",
-                 s_wake_enabled ? "ENABLED" : "DISABLED");
-    } else if (strncmp(line, "tts stats", 9) == 0) {
-        audio::tts_player_print_stats();
-    } else if (strncmp(line, "wake enable", 11) == 0) {
-        s_wake_enabled = true;
-        s_audio_recording = false;  /* wake 模式自动控制 */
-        ESP_LOGI(TAG, "🌟 [W4] wake detection ENABLED (喊一声激活, 静音 2s 自动停止)");
-    } else if (strncmp(line, "wake disable", 12) == 0) {
-        s_wake_enabled = false;
-        ESP_LOGI(TAG, "💤 [W4] wake detection DISABLED");
-    } else if (strncmp(line, "wake status", 11) == 0) {
-        ESP_LOGI(TAG, "🌟 [W4] wake = %s, audio_recording = %s",
-                 s_wake_enabled ? "ENABLED" : "DISABLED",
-                 s_audio_recording ? "ON" : "OFF");
-        audio::wake_word_detector_print_stats();
+    int ret;
+    esp_err_t err = esp_console_run(line, &ret);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "命令 '%s' 解析失败 (%s)", line, esp_err_to_name(err));
     }
 }
+
+/* 注意: v7 已删除手写的 uart_command_task, 改用 esp_console_new_repl_uart() +
+ *      esp_console_start_repl() 创建独立 REPL task (官方 esp_claw 做法, 10KB 栈).
+ *      见主循环内 s_uart_repl_started 分支. */
 
 /* ── W3: WS Binary 帧回调 (TTS 下行 PCM 24kHz mono) ── */
 static void on_dsh_binary_pcm(const uint8_t *data, size_t len, void *user_data)
@@ -626,6 +755,96 @@ extern "C" void app_main(void)
     /* 主循环 */
     while (1) {
         esp_task_wdt_reset();
+
+        /* W3/W4 修复: 读取 UART 命令
+         *
+         * v4 重大修复: 用独立 task 处理 UART 命令, 避免主 task 栈溢出!
+         *
+         * 之前 v3 (esp_console_init + uart_vfs_dev_use_driver 在主循环里) 触发:
+         *   Guru Meditation Error: Core 0 panic'ed (Stack protection fault)
+         *   Stack bounds: 0x4ff2ae08 - 0x4ff2bd80 = 仅 4KB 栈空间
+         *
+         * 原因: linenoise + esp_console 在主循环里 init 会占大栈, 主 task 默认 4KB 不够.
+         *
+         * 修复 (参考 ESP-IDF esp_console REPL 模式架构):
+         *   - 启动独立 task "uart_cmd" (8KB 栈, priority 3)
+         *   - task 内部 init esp_console + 注册命令 + select/fgetc 循环
+         *   - 主循环不参与 UART 处理, 继续跑 10s 心跳
+         *
+         * 这是 ESP-IDF 官方推荐做法: 让 console 用自己的 task
+         * 参考: components/console/esp_console_repl.c (REPL 内部就是这么做)
+         */
+        {
+            static bool s_uart_repl_started = false;
+            if (!s_uart_repl_started) {
+                s_uart_repl_started = true;
+                /* v7 重写: 完全对齐 esp_claw 官方实现 (cap_cli.c / app_claw_cli.c)
+                 *
+                 * 之前 v3-v6 失败根因: 我手动实现 esp_console REPL (esp_console_init + fgetc + select)
+                 *   - 8KB 栈: panic 在 linenoise prompt render
+                 *   - 16KB 栈: panic 在 vfprintf 格式化字符串
+                 *   - 32KB 栈: panic 在 vfprintf (栈底擦痕)
+                 *
+                 * 官方 esp_claw 用 esp_console_new_repl_uart() + esp_console_start_repl()
+                 *   task_stack_size=10240 (10KB) 就能跑!
+                 *
+                 * 参考: /tmp/esp_claw_p4c5/components/common/app_claw/app_claw_cli.c
+                 *   esp_console_repl_config_t repl_config = ESP_CONSOLE_REPL_CONFIG_DEFAULT();
+                 *   repl_config.prompt = "app> ";
+                 *   repl_config.task_stack_size = 10240;
+                 *   repl_config.max_cmdline_length = 512;
+                 *   esp_console_dev_uart_config_t hw_config = ESP_CONSOLE_DEV_UART_CONFIG_DEFAULT();
+                 *   esp_console_new_repl_uart(&hw_config, &repl_config, &repl);
+                 *   esp_console_register_help_command();
+                 *   register_cap_cli_commands();
+                 *   ...
+                 *   esp_console_start_repl(repl);  // 阻塞但会创建 REPL task
+                 */
+                esp_console_repl_t *repl = NULL;
+                esp_console_repl_config_t repl_config = ESP_CONSOLE_REPL_CONFIG_DEFAULT();
+                repl_config.prompt = "p4c5> ";
+                repl_config.task_stack_size = 10240;     // 10KB - 官方 esp_claw 值
+                repl_config.max_cmdline_length = 512;     // 官方 esp_claw 值
+
+                /* 关键修复 v10: 全部错了!  /dev/cu.usbmodem1301 不是 CH343P,
+                 *   而是 ESP32-P4 **native USB-Serial-JTAG** (Espressif vendor 0x303A).
+                 *   证据: ioreg 显示 USB JTAG/serial debug unit @ /dev/cu.usbmodem1301.
+                 *   因此 REPL 必须用 esp_console_new_repl_usb_serial_jtag,
+                 *   不能用 esp_console_new_repl_uart (UART0/GPIO38/37).
+                 *
+                 * CH343P 在 KSDIY_P4C5 board 上**根本没接线**或没安装 (或者我接到
+                 *   另一个 USB hub 端口). macOS 上看不到任何 CH343P vendor (0x1a86).
+                 *   所以 p4c5-pins.csv 写的 GPIO4/GPIO37 那张表是**未来的接线**,
+                 *   实际板子用 USB-Serial-JTAG.
+                 *
+                 * v1-v9 都用 esp_console_new_repl_uart → 字符永远到不了 ESP32 (字符去了 UART0 GPIO38/37,
+                 *   但 macOS 通过 USB-Serial-JTAG device 发字符, USB-Serial-JTAG 在 ESP32 内部
+                 *   是另一条独立的 RX/TX channel, 跟 GPIO38/37 UART0 没关系).
+                 */
+                esp_console_dev_usb_serial_jtag_config_t hw_config = ESP_CONSOLE_DEV_USB_SERIAL_JTAG_CONFIG_DEFAULT();
+                esp_err_t repl_err = esp_console_new_repl_usb_serial_jtag(&hw_config, &repl_config, &repl);
+                ESP_LOGI(TAG, "REPL 通道: USB-Serial-JTAG (vs UART0 的 GPIO37/38, 那个走不通)");
+                if (repl_err != ESP_OK) {
+                    ESP_LOGE(TAG, "esp_console_new_repl_uart failed: %s", esp_err_to_name(repl_err));
+                } else {
+                    ESP_LOGI(TAG, "REPL 创建成功");
+                }
+                if (repl_err != ESP_OK) {
+                    ESP_LOGE(TAG, "esp_console_new_repl_uart failed: %s", esp_err_to_name(repl_err));
+                } else {
+                    esp_console_register_help_command();
+                    register_uart_commands();
+                    ESP_LOGI(TAG, "Starting esp_console REPL (task_stack=10240)");
+                    esp_err_t start_err = esp_console_start_repl(repl);
+                    if (start_err != ESP_OK) {
+                        ESP_LOGE(TAG, "esp_console_start_repl failed: %s", esp_err_to_name(start_err));
+                    }
+                    ESP_LOGI(TAG, "REPL 已启动 - 试着在另一个终端用 miniterm/pyserial 发 'help\\r'");
+                    vTaskDelay(pdMS_TO_TICKS(2000));   /* 给 REPL task 时间 print prompt */
+                }
+            }
+        }
+
         vTaskDelay(pdMS_TO_TICKS(10000));
 
         /* W1-stable: heartbeat 显示 bat + WiFi 状态 */

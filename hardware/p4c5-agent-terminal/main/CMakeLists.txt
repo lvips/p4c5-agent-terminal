@@ -29,4 +29,6 @@ idf_component_register(SRCS ${SOURCES}
         esp_lcd_st7102
         pmic_axp2101
         esp_audio_codec
+        console                       # W3/W4 fix: ESP-IDF 官方 esp_console (v5.5)
+        vfs                           # esp_vfs_dev.h (含 esp_vfs_dev_uart_use_driver)
 )
