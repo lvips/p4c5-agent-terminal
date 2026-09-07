@@ -25,8 +25,10 @@
 #include "audio_mixer.h"           /* W3: 4ch→1ch 混音 (OMT 移植) */
 #include "driver/uart.h"           /* v8 修复: uart_set_pin() */
 #include "driver/gpio.h"           /* v9 诊断: gpio_get_level() */
-#include "aec_sw.h"                /* W3: 软件 AEC 回声消除 (NLMS, P4 自实现) */
-#include "resampler_24_16.h"       /* W3: 24kHz→16kHz 重采样 (适配 p4c5_audio 24kHz) */
+#include "aec_sw.h"                /* W3: 软件 AEC 回声消除 (NLMS, P4 自实现, P1 后保留作为 fallback) */
+#include "resampler_24_16.h"       /* W3: 24kHz→16kHz 重采样 (P1 后保留作为 fallback) */
+#include "audio_afe_processor.h"   /* P1: ESP-SR AFE (AEC + NS + VAD 神经网络) */
+#include "audio_wake_word.h"       /* P1: ESP-SR WakeNet9 唤醒词检测 */
 #include "opus_encoder.h"          /* W3: libopus 编码 (16kbps, 20ms 帧) */
 #include "tts_player.h"            /* W3: TTS 下行 PCM 播放 (WS Binary → ES8311 DAC) */
 #include "wake_word_detector.h"    /* W4: P4 自实现 RMS-based 唤醒检测 */
@@ -268,64 +270,92 @@ static void audio_uplink_task(void *arg)
 {
     (void)arg;
 
-    /* 20ms 帧规格 (适配 p4c5_audio 24kHz) */
-    constexpr size_t FRAME_SAMPLES_24K = 480;   /* 24kHz × 0.020s = 480 samples */
-    constexpr size_t FRAME_SAMPLES_16K = 320;   /* 16kHz × 0.020s = 320 samples */
+    /* P1 帧规格 (ESP-SR AFE 1MIC 期望 16kHz × 32ms × 2ch layout = 1024 samples)
+     *
+     * 我们的硬件: ES7210 输出 4ch 24kHz TDM
+     *   - 32ms @ 24kHz = 768 samples/ch (3072 samples total)
+     *
+     * 我们手动:
+     *   1. 提取 ch0 (mic) + ch1 (ref) → 2ch 24kHz 1536 samples
+     *   2. resample 24k→16k: 1536 → 1024 samples (2ch × 16kHz × 32ms)
+     *   3. 喂 AFE: 1024 samples (16kHz × 32ms × 2ch [mic,ref])
+     *   4. fetch AFE: 512 samples (16kHz × 32ms × 1ch mono)
+     *   5. Opus encode → WS send
+     */
+    constexpr size_t FRAME_SAMPLES_24K = 768;       /* 24kHz × 32ms = 768 samples/ch */
 
-    static int16_t s_in4ch_buf[480 * 4];        /* 4ch × 480 = 1920 samples = 3840 bytes */
-    static int16_t s_mic_mono[480];             /* ch0+ch2 平均 → mono 24kHz */
-    static int16_t s_ref_mono[480];             /* ch1 → AEC ref 24kHz */
-    static int16_t s_aec_out[480];              /* AEC 后 mono 24kHz */
-    static int16_t s_mono16k[320];              /* resampler 输出 16kHz */
-    static uint8_t s_opus_buf[1276];            /* OPUS max packet (RFC 6716) */
+    static int16_t s_in4ch_buf[768 * 4];            /* 4ch × 768 = 3072 samples */
+    static int16_t s_2ch_16k_buf[1024];             /* AFE 输入: mic+ref 16kHz 2ch */
+    static int16_t s_out_16k_mono[1024];            /* AFE 输出: 16kHz mono */
+    static uint8_t s_opus_buf[1276];                /* OPUS max packet */
+    static int16_t s_pcm_acc[1024];                 /* PCM 累积 buffer (opus 60ms = 960 samples) */
+    static size_t  s_pcm_acc_n = 0;                 /* 已累积 samples 数 */
 
-    /* ── 初始化 3 组件 + 软件 AEC ── */
-    audio::AudioMixerConfig mixer_cfg = audio::audio_mixer_default_config();
-    mixer_cfg.in_channels = 4;
-    mixer_cfg.sample_rate = 24000;
-    ESP_ERROR_CHECK(audio::audio_mixer_init(mixer_cfg));
+    /* ── P1: 初始化 ESP-SR AFE (1MIC 模式, mic+ref 2ch layout) ── */
+    AudioAfeProcessor afe;
+    esp_err_t afe_ret = afe.init(
+        "MR",                                       /* input_format: mic + ref, 2 channels */
+        "model",                                    /* srmodels 分区名 */
+        P4C5_AUDIO_INPUT_REF,                       /* AEC 开 (有 ref) */
+        true,                                       /* NS 开 (NSNet2 噪声抑制) */
+        true,                                       /* VAD 开 (VADNet1) */
+        false                                       /* Wake 不在 AFE_VC, 走 audio_wake_word 组件 */
+    );
+    if (afe_ret != ESP_OK) {
+        ESP_LOGE("audio_uplink", "❌ ESP-SR AFE init failed: %s, abort",
+                 esp_err_to_name(afe_ret));
+        vTaskDelete(NULL);
+        return;
+    }
+    ESP_LOGI("audio_uplink", "  ✅ ESP-SR AFE ready (AEC=ON, NS=ON, VAD=ON)");
 
-    audio::AecConfig aec_cfg = audio::aec_sw_default_config();
-    aec_cfg.sample_rate     = 24000;
-    aec_cfg.filter_taps     = 128;          /* 5.3ms @ 24kHz */
-    aec_cfg.step_size       = 0.005f;
-    aec_cfg.leakage         = 0.999f;
-    aec_cfg.ref_gain        = 1.0f;
-    aec_cfg.enable_aec      = P4C5_AUDIO_INPUT_REF;  /* 硬件有 ref 才开 */
-    ESP_ERROR_CHECK(audio::aec_sw_init(aec_cfg));
-
-    audio::ResamplerConfig res_cfg = audio::resampler_24_16_default_config();
-    ESP_ERROR_CHECK(audio::resampler_24_16_init(res_cfg));
-
+    /* ── Opus 编码器 (P1: AFE 输出 512 samples / 32ms, 用 60ms frame 累积编码) ── */
     audio::OpusEncoderConfig opus_cfg = audio::opus_encoder_default_config();
+    opus_cfg.frame_ms = 60;   /* 60ms = 960 samples (累积 2 次 AFE fetch = 1024 samples) */
     ESP_ERROR_CHECK(audio::opus_encoder_init(opus_cfg));
 
-    /* W4: 唤醒检测初始化 (自适应阈值: 自动适应环境噪声) */
-    audio::WakeDetectorConfig wake_cfg;
-    wake_cfg.sample_rate         = 24000;
-    wake_cfg.wake_rms_threshold  = 1500;  /* 初始唤醒 RMS 阈值 (会被自适应覆盖) */
-    wake_cfg.sleep_rms_threshold = 500;   /* 初始睡眠 RMS 阈值 */
-    wake_cfg.wake_hold_frames    = 5;     /* 100ms 持续唤醒 */
-    wake_cfg.sleep_hold_frames   = 100;   /* 2s 持续静音后睡眠 */
-    wake_cfg.adaptive_threshold  = true;  /* W4+: 启用自适应噪声阈值 */
-    wake_cfg.noise_floor_alpha   = 1;     /* EMA 系数 */
-    wake_cfg.wake_delta          = 1000;  /* wake 阈值 = noise_floor + 1000 */
-    wake_cfg.sleep_delta         = 200;   /* sleep 阈值 = noise_floor + 200 */
-    wake_cfg.noise_update_frames = 50;    /* 每 1s 更新一次 noise_floor */
-    ESP_ERROR_CHECK(audio::wake_word_detector_init(wake_cfg));
+    /* esp-sr get_feed_chunksize 返回 aec_frame_size (per-channel samples @ 16kHz)
+     * AFE 期望 input layout: [mic0, ref0, mic1, ref1, ...]
+     * total samples per feed = aec_frame_size × input_channels (mic + ref = 2)
+     *
+     * fetch_chunksize × 1 ch (mono output) */
+    constexpr size_t AFE_FEED_SAMPLES  = 512 * 2;  /* 16kHz × 32ms × 2ch (mic+ref) = 1024 */
+    constexpr size_t AFE_FETCH_SAMPLES = 512;      /* 16kHz × 32ms × 1ch mono */
 
-    ESP_LOGI("audio_uplink", "W3+W4 音频上行链路启动");
-    ESP_LOGI("audio_uplink", "  4ch@24kHz (ch0+ch2=mic, ch1=AEC_ref, ch3=unused)");
-    ESP_LOGI("audio_uplink", "  → 软件 AEC (NLMS, taps=%u, mu=%.4f)",
-             aec_cfg.filter_taps, aec_cfg.step_size);
-    ESP_LOGI("audio_uplink", "  → 24k→16k 重采样 → opus → WS Binary 上行");
+    /* ── P1: 初始化 ESP-SR WakeNet9 (替代自实现 RMS wake_word_detector) ── */
+    /* P1 v3: 临时禁用 WakeNet (吃太多内部 RAM, 导致 LVGL + esp_hosted OOM)
+     * 设为 1 启用 WakeNet9; 设为 0 用旧 RMS wake (W4) */
+#define P4C5_USE_WAKE_NET9 0
+    AudioWakeWord wake_word;
+#if P4C5_USE_WAKE_NET9
+    bool wake_init_ok = (wake_word.init("MR", "model", nullptr) == ESP_OK);
+#else
+    bool wake_init_ok = false;
+    ESP_LOGW("audio_uplink", "  ⚠️ WakeNet9 disabled (P4C5_USE_WAKE_NET9=0, 用 W4 RMS wake)");
+#endif
+    if (wake_init_ok) {
+        wake_word.on_detected([](const std::string& word) {
+            ESP_LOGW("audio_uplink", "🌟 WakeNet9 检测到唤醒词: '%s'", word.c_str());
+            /* TODO: 唤醒时切到 RECORDING 状态, 启动 mic 上行 */
+        });
+        wake_word.start();
+        ESP_LOGI("audio_uplink", "  ✅ WakeNet9 ready (检测 '嗨乐鑫' 触发唤醒)");
+    } else {
+        ESP_LOGW("audio_uplink", "  ⚠️ WakeNet9 init failed, 上行仅手动模式");
+    }
+
+    ESP_LOGI("audio_uplink", "P1 音频上行链路启动 (ESP-SR AFE + WakeNet9)");
+    ESP_LOGI("audio_uplink", "  4ch@24kHz TDM (ch0=mic, ch1=AEC_ref, ch2/ch3=unused)");
+    ESP_LOGI("audio_uplink", "  → ch0+ch1 提取 (2ch) → 24k→16k resample (1536→1024)");
+    ESP_LOGI("audio_uplink", "  → ESP-SR AFE (AEC + NS + VAD 神经网络) → 16k mono");
+    ESP_LOGI("audio_uplink", "  → opus → WS Binary 上行");
     ESP_LOGI("audio_uplink", "触发方式:");
     ESP_LOGI("audio_uplink", "  - 串口 'audio start/stop' (手动)");
-    ESP_LOGI("audio_uplink", "  - 串口 'wake enable' (W4: RMS-based 自动唤醒)");
+    ESP_LOGI("audio_uplink", "  - '嗨乐鑫' 唤醒词 (P1: WakeNet9)");
 
     uint64_t frame_count  = 0;
     uint64_t sent_count   = 0;
-    bool     is_uploading = false;  /* 当前是否在上行 (RECORDING 状态) */
+    bool     is_uploading = false;
 
     for (;;) {
         /* 总门控: 必须 audio_recording 或 wake_enabled 任一开启 */
@@ -355,95 +385,121 @@ static void audio_uplink_task(void *arg)
             is_uploading = true;
         }
 
-        /* 1. 4 通道 24kHz 录音 */
+        /* 1. 4 通道 24kHz 录音 (P1: 32ms = 768 samples/ch) */
         esp_err_t ret = p4c5_audio_record_multi(s_in4ch_buf, FRAME_SAMPLES_24K);
         if (ret != ESP_OK) {
             if ((frame_count % 250) == 0) {
                 ESP_LOGW("audio_uplink", "p4c5_audio_record_multi 失败: %s", esp_err_to_name(ret));
             }
-            vTaskDelay(pdMS_TO_TICKS(20));
+            vTaskDelay(pdMS_TO_TICKS(32));
             continue;
         }
 
-        /* 2. 4 通道分离: ch0+ch2 → mic, ch1 → ref, ch3 → unused
-         *
-         * TDM 帧布局: [ch0_s0, ch1_s0, ch2_s0, ch3_s0, ch0_s1, ch1_s1, ...]
-         * mic = (ch0 + ch2) / 2
-         * ref = ch1 (扬声器回采)
-         */
+        /* 2. P1: 通道提取 ch0 (mic) + ch1 (ref) → 2ch 24kHz 1536 samples
+         *    TDM 帧布局: [ch0_s0, ch1_s0, ch2_s0, ch3_s0, ch0_s1, ch1_s1, ...] */
         for (size_t i = 0; i < FRAME_SAMPLES_24K; i++) {
-            int32_t ch0 = s_in4ch_buf[i * 4 + 0];
-            int32_t ch1 = s_in4ch_buf[i * 4 + 1];
-            int32_t ch2 = s_in4ch_buf[i * 4 + 2];
-            /* ch3 unused */
-
-            s_mic_mono[i] = (int16_t)((ch0 + ch2) / 2);
-            s_ref_mono[i] = (int16_t)ch1;
+            int16_t mic_s = s_in4ch_buf[i * 4 + 0];   /* ch0 = mic */
+            int16_t ref_s = s_in4ch_buf[i * 4 + 1];   /* ch1 = AEC ref */
+            s_2ch_16k_buf[i * 2 + 0] = mic_s;          /* mic (interleaved, 2ch) */
+            s_2ch_16k_buf[i * 2 + 1] = ref_s;          /* ref */
         }
 
-        /* 3. 软件 AEC (NLMS): mic - estimated_echo → out
-         *
-         * 限制:
-         *   - 仅 P4C5_AUDIO_INPUT_REF=true 时有效
-         *   - 硬件需真有 AEC ref 回采 (ES8311 输出 → ES7210 MIC2)
-         */
-        ret = audio::aec_sw_process(s_mic_mono, s_ref_mono,
-                                     s_aec_out, FRAME_SAMPLES_24K);
-        if (ret != ESP_OK) {
+        /* 3. P1: 24kHz → 16kHz 重采样 (1536 → 1024 samples, 线性插值)
+         *    简单线性插值: out[i] = in[i * 24/16] = in[i * 3/2] */
+        /*    1024 output samples × 2 channels = 2048 samples
+         *    从 1536 × 2 = 3072 input samples
+         *    resample 后放到 s_2ch_16k_buf (overwrite) */
+        static int16_t s_2ch_16k_resampled[2048];     /* 1024 frames × 2ch */
+        for (size_t i = 0; i < 1024; i++) {
+            /* 24→16 resample: 16kHz 1024 samples 对应 24kHz 1536 samples
+             * ratio = 24/16 = 1.5
+             * 16kHz sample i 对应 24kHz sample i * 1.5 */
+            size_t idx_24k = (i * 24) / 16;            /* = i * 1.5 */
+            if (idx_24k >= FRAME_SAMPLES_24K) idx_24k = FRAME_SAMPLES_24K - 1;
+            s_2ch_16k_resampled[i * 2 + 0] = s_2ch_16k_buf[idx_24k * 2 + 0];  /* mic */
+            s_2ch_16k_resampled[i * 2 + 1] = s_2ch_16k_buf[idx_24k * 2 + 1];  /* ref */
+        }
+
+        /* 4. P1: 喂 ESP-SR AFE (2ch 16kHz, 32ms = 1024 samples) */
+        esp_err_t feed_ret = afe.feed(s_2ch_16k_resampled, AFE_FEED_SAMPLES);
+        if (feed_ret != ESP_OK) {
+            ESP_LOGW("audio_uplink", "AFE feed failed: %s", esp_err_to_name(feed_ret));
             frame_count++;
             continue;
         }
 
-        /* W4: 唤醒检测 - 仅在 wake_enabled 且非手动 audio_recording 时检测
-         *    手动 audio_recording 跳过 wake (强制上行)
-         */
-        if (s_wake_enabled && !s_audio_recording) {
-            audio::WakeEvent evt = audio::wake_word_detector_feed(
-                s_aec_out, FRAME_SAMPLES_24K);
-            if (evt == audio::WakeEvent::WAKE && !is_uploading) {
-                is_uploading = true;
-                ESP_LOGI("audio_uplink", "🌟 唤醒! 开始上行 (W4 auto)");
-            } else if (evt == audio::WakeEvent::SLEEP && is_uploading) {
-                is_uploading = false;
-                ESP_LOGI("audio_uplink", "💤 睡眠, 停止上行 (W4 auto)");
+        /* P1: WakeNet9 同时检测唤醒词 */
+        if (wake_init_ok && s_wake_enabled && !s_audio_recording) {
+            int16_t wake_pcm[AFE_FETCH_SAMPLES];
+            size_t  wake_n = 0;
+            audio_afe_vad_state_t wake_vad = AFE_VAD_SILENCE_P4;
+            if (afe.fetch_immediate(wake_pcm, AFE_FETCH_SAMPLES, &wake_n, &wake_vad) == ESP_OK) {
+                if (wake_n > 0) {
+                    wake_word.feed(wake_pcm, wake_n);
+                }
             }
-        } else {
-            /* 手动模式: 总是上行 */
-            is_uploading = s_audio_recording;
         }
 
-        /* 不上行时, 只录音不上行 (节省带宽 + 等待唤醒) */
-        if (!is_uploading) {
+        /* 5. 不上行时, 只录音不上行 (节省带宽 + 等待唤醒) */
+        if (!is_uploading && !s_audio_recording) {
             frame_count++;
             continue;
         }
 
-        /* 4. 24kHz → 16kHz 重采样 (480 → 320 samples) */
-        size_t out_len = 0;
-        ret = audio::resampler_24_16_process(s_aec_out, s_mono16k, &out_len);
-        if (ret != ESP_OK || out_len != FRAME_SAMPLES_16K) {
+        /* 6. fetch AFE 输出 (16kHz mono 32ms = 512 samples) */
+        size_t out_samples = 0;
+        audio_afe_vad_state_t vad_state = AFE_VAD_SILENCE_P4;
+        esp_err_t fetch_ret = afe.fetch_immediate(
+            s_out_16k_mono, sizeof(s_out_16k_mono) / sizeof(int16_t),
+            &out_samples, &vad_state);
+        if (fetch_ret != ESP_OK || out_samples == 0) {
             frame_count++;
             continue;
         }
 
-        /* 5. Opus 编码 */
+        /* 7. 累积 PCM 到 60ms (opus 60ms frame = 960 samples)
+         *    2 次 fetch (512 each) 凑齐 1024 > 960, 编码 960 留 64 继续累积 */
+        if (s_pcm_acc_n + out_samples < 960) {
+            /* 还不满 1 个 opus frame */
+            memcpy(s_pcm_acc + s_pcm_acc_n, s_out_16k_mono, out_samples * sizeof(int16_t));
+            s_pcm_acc_n += out_samples;
+            frame_count++;
+            continue;
+        }
+
+        /* 凑齐 960 samples: 编码前 960 samples, 留剩下的 */
+        size_t need       = 960;
+        size_t take_from_acc = (s_pcm_acc_n >= need) ? need : s_pcm_acc_n;
+        memcpy(s_pcm_acc + s_pcm_acc_n, s_out_16k_mono, (need - take_from_acc) * sizeof(int16_t));
+        s_pcm_acc_n = take_from_acc;  /* 累积数 = take_from_acc (因为加了 need-take_from_acc) */
+        size_t encode_n = need;
+
+        /* 8. Opus 编码 60ms */
         size_t opus_len = sizeof(s_opus_buf);
-        ret = audio::opus_encoder_encode(s_mono16k, FRAME_SAMPLES_16K,
+        ret = audio::opus_encoder_encode(s_pcm_acc, encode_n,
                                           s_opus_buf, &opus_len);
         if (ret != ESP_OK) {
             frame_count++;
             continue;
         }
 
-        /* 6. WS Binary 帧上行 */
+        /* 把剩下的 samples 移到 buffer 头 */
+        if (s_pcm_acc_n > encode_n) {
+            memmove(s_pcm_acc, s_pcm_acc + encode_n, (s_pcm_acc_n - encode_n) * sizeof(int16_t));
+            s_pcm_acc_n -= encode_n;
+        } else {
+            s_pcm_acc_n = 0;
+        }
+
+        /* 8. WS Binary 帧上行 */
         esp_err_t send_ret = dsh_client_send_audio(s_opus_buf, opus_len);
         if (send_ret == ESP_OK) {
             sent_count++;
             if ((sent_count % 250) == 0) {
-                ESP_LOGI("audio_uplink", "已发送 %llu 帧 (opus %u bytes/帧, AEC=%s, wake=%s)",
+                ESP_LOGI("audio_uplink", "已发送 %llu 帧 (opus %u bytes/帧, VAD=%s, wake=%s)",
                          (unsigned long long)sent_count, (unsigned)opus_len,
-                         aec_cfg.enable_aec ? "ON" : "OFF",
-                         s_wake_enabled ? "AUTO" : "MAN");
+                         vad_state == AFE_VAD_SPEECH_P4 ? "SPEECH" : "SILENCE",
+                         s_wake_enabled ? "WN9" : "MAN");
             }
         }
 
@@ -468,15 +524,14 @@ static void audio_uplink_task(void *arg)
                 }
                 return x;
             };
-            uint32_t mic_rms = calc_rms(s_mic_mono, FRAME_SAMPLES_24K);
-            uint32_t ref_rms = calc_rms(s_ref_mono, FRAME_SAMPLES_24K);
-            uint32_t aec_rms = calc_rms(s_aec_out,   FRAME_SAMPLES_24K);
+            uint32_t mic_rms = calc_rms(s_in4ch_buf, FRAME_SAMPLES_24K * 4);
+            uint32_t out_rms = calc_rms(s_out_16k_mono, out_samples);
             ESP_LOGI("audio_diag",
-                     "frame=%llu mic=%u ref=%u aec=%u aec/mic=%u%% "
-                     "(期望: ref>>mic, aec<<mic 表示 AEC 收敛)",
+                     "frame=%llu mic4ch=%u out16k=%u VAD=%s "
+                     "(P1: ESP-SR AFE AEC/NS/VAD 全开)",
                      (unsigned long long)frame_count,
-                     (unsigned)mic_rms, (unsigned)ref_rms, (unsigned)aec_rms,
-                     (unsigned)((aec_rms * 100) / (mic_rms ? mic_rms : 1)));
+                     (unsigned)mic_rms, (unsigned)out_rms,
+                     vad_state == AFE_VAD_SPEECH_P4 ? "SPEECH" : "SILENCE");
         }
     }
 }

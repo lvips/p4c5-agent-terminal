@@ -380,12 +380,15 @@ esp_err_t p4c5_ui_init(void)
     esp_lv_adapter_display_config_t disp_cfg =
         ESP_LV_ADAPTER_DISPLAY_MIPI_DEFAULT_CONFIG(
             s_panel, s_panel_io, UI_WIDTH, UI_HEIGHT, ESP_LV_ADAPTER_ROTATE_0);
+    /* P1: ESP-SR AFE 占了大量内部 RAM, LVGL triple-partial mode 强制内部 RAM.
+     * 缩小 buffer_height 到 20 (480×20×2=19200 bytes) 让内部 RAM 能装. */
+    disp_cfg.profile.buffer_height = 20;
     s_disp = esp_lv_adapter_register_display(&disp_cfg);
     if (!s_disp) {
         ESP_LOGE(TAG, "register_display failed");
         return ESP_ERR_NO_MEM;
     }
-    ESP_LOGI(TAG, "LVGL display registered (MIPI DSI, TRIPLE_PARTIAL)");
+    ESP_LOGI(TAG, "LVGL display registered (MIPI DSI, TRIPLE_PARTIAL, buf_h=20)");
 
     /* 3. 注册 touch input device */
     if (s_touch) {

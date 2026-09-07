@@ -74,7 +74,8 @@ except ImportError:
 
 SAMPLE_RATE = 16000
 CHANNELS = 1
-FRAME_SIZE_20MS = 320  # 16000 * 0.020 = 320 samples per 20ms frame
+FRAME_SIZE_20MS = 320   # 16000 * 0.020 = 320 samples per 20ms frame (W3 default)
+FRAME_SIZE_60MS = 960   # 16000 * 0.060 = 960 samples per 60ms frame (P1: ESP-SR AFE 32ms × 2 = 64ms 累积到 60ms)
 
 # VAD 参数 (OMT 文中已注释: 16-bit PCM, RMS 阈值与静音超时)
 VAD_RMS_START = 80          # ~ -57 dBFS on 16-bit
@@ -270,8 +271,9 @@ class OpusDecoder:
         self.decoder = opuslib.Decoder(SAMPLE_RATE, CHANNELS)
 
     def decode(self, opus_frame: bytes) -> np.ndarray:
-        """解码一个 OPUS 帧 (20ms @ 16kHz) → PCM Int16"""
-        pcm_bytes = self.decoder.decode(opus_frame, FRAME_SIZE_20MS)
+        """解码一个 OPUS 帧 (P1: 60ms @ 16kHz = 960 samples) → PCM Int16"""
+        # P1: ESP32 AFE 32ms fetch, 累积到 60ms 编码, 一次发 960 samples
+        pcm_bytes = self.decoder.decode(opus_frame, FRAME_SIZE_60MS)
         return np.frombuffer(pcm_bytes, dtype=np.int16)
 
 
@@ -289,9 +291,9 @@ class MockOpusDecoder:
     def decode(self, opus_frame: bytes) -> np.ndarray:
         self.frame_idx += 1
         if opus_frame and opus_frame[0] == 0x00:
-            return np.zeros(FRAME_SIZE_20MS, dtype=np.int16)
+            return np.zeros(FRAME_SIZE_60MS, dtype=np.int16)
         else:
-            t = np.arange(FRAME_SIZE_20MS, dtype=np.float32) + self.frame_idx * FRAME_SIZE_20MS
+            t = np.arange(FRAME_SIZE_60MS, dtype=np.float32) + self.frame_idx * FRAME_SIZE_60MS
             wave = (np.sin(2 * np.pi * 1000 * t / SAMPLE_RATE) * 12000).astype(np.int16)
             return wave
 

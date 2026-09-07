@@ -110,8 +110,15 @@ esp_err_t AudioAfeProcessor::init(const char* input_format,
         return ESP_ERR_NO_MEM;
     }
 
-    impl->feed_chunk_bytes  = impl->iface->get_feed_chunksize(impl->data);
-    impl->fetch_chunk_bytes = impl->iface->get_fetch_chunksize(impl->data);
+    /* esp-sr get_feed_chunksize 返回 aec_frame_size (per-channel samples @ 16kHz)
+     * AFE 期望 input layout: [mic0, ref0, mic1, ref1, ...]
+     * total samples per feed = aec_frame_size × input_channels (mic + ref = 2)
+     * xiaozhi 模式: feed_size = chunk * input_channels */
+    int feed_chunk_per_ch  = impl->iface->get_feed_chunksize(impl->data);   /* = 512 */
+    int fetch_chunk_per_ch = impl->iface->get_fetch_chunksize(impl->data);  /* = 512 */
+    int input_ch           = impl->iface->get_channel_num(impl->data);      /* 1MIC = 1 */
+    impl->feed_chunk_bytes  = feed_chunk_per_ch * input_ch * (int)sizeof(int16_t);   /* 512*1*2 = 1024 */
+    impl->fetch_chunk_bytes = fetch_chunk_per_ch * (int)sizeof(int16_t);             /* 512*2 = 1024 */
     feed_chunk_bytes_  = impl->feed_chunk_bytes;
     fetch_chunk_bytes_ = impl->fetch_chunk_bytes;
 
