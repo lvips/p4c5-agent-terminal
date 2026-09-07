@@ -309,10 +309,27 @@ static void audio_uplink_task(void *arg)
         if (!s_audio_recording && !s_wake_enabled) {
             if (is_uploading) {
                 ESP_LOGI("audio_uplink", "🛑 停止上行 (门控关闭)");
+                p4c5_audio_enable_input(false);  /* v11: 释放 ADC */
                 is_uploading = false;
             }
             vTaskDelay(pdMS_TO_TICKS(20));
             continue;
+        }
+
+        /* v11 修复: 启动录音前必须 enable ADC input (否则 ESP_ERR_INVALID_STATE).
+         * 之前 audio_uplink_task 只调 record_multi() 但 s_input_enabled=false,
+         * 导致 codec_dev 没 open, 一直返回 INVALID_STATE.
+         */
+        if (!is_uploading) {
+            esp_err_t en_ret = p4c5_audio_enable_input(true);
+            if (en_ret != ESP_OK) {
+                ESP_LOGE("audio_uplink", "enable_input(true) failed: %s",
+                         esp_err_to_name(en_ret));
+                vTaskDelay(pdMS_TO_TICKS(100));
+                continue;
+            }
+            ESP_LOGI("audio_uplink", "🎙️ 启动上行 (ADC 4ch enabled)");
+            is_uploading = true;
         }
 
         /* 1. 4 通道 24kHz 录音 */
@@ -731,7 +748,7 @@ extern "C" void app_main(void)
     }
 
     /* W3: 启动音频上行任务 (POC: 串口命令触发) */
-    xTaskCreate(audio_uplink_task, "audio_uplink", 16384, NULL, 5, NULL);
+    xTaskCreate(audio_uplink_task, "audio_uplink", 32768, NULL, 5, NULL);  // v11: 16KB 不够, 升 32KB
 
     /* W3: 启动 TTS 下行播放任务 */
     err = audio::tts_player_init();
