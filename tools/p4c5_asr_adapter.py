@@ -56,6 +56,9 @@ try:
 except ImportError:
     HAS_OPUS = False
     logging.warning("opuslib 未安装, 将使用 mock decoder")
+except Exception as e:
+    HAS_OPUS = False
+    logging.warning("opuslib 导入异常: %s", e)
 
 # HTTP 客户端 (REST 调用阿里云)
 try:
@@ -165,6 +168,23 @@ def get_nls_token(access_key_id: str, access_key_secret: str) -> dict:
 # ══════════════════════════════════════════════════════════
 # OMT 复刻: 阿里云 NLS 一句话识别 (ISI)
 # ══════════════════════════════════════════════════════════
+
+def get_aliyun_credentials():
+    """获取阿里云 NLS 凭证 (兼容两种命名: ISI_* OMT 风格 / ALIYUN_* p4c5 风格)
+
+    优先级: ALIYUN_* > ISI_* (OMT 风格)
+
+    Returns:
+        (access_key_id, access_key_secret, appkey) 或 (None, None, None)
+    """
+    ak_id = (os.environ.get("ALIYUN_ACCESS_KEY_ID")
+             or os.environ.get("ISI_ACCESS_KEY_ID"))
+    ak_secret = (os.environ.get("ALIYUN_ACCESS_KEY_SECRET")
+                 or os.environ.get("ISI_ACCESS_KEY_SECRET"))
+    appkey = (os.environ.get("ALIYUN_NLS_APPKEY")
+              or os.environ.get("ISI_APPKEY"))
+    return ak_id, ak_secret, appkey
+
 
 def call_isi_one_shot(pcm_bytes: bytes, token: str, appkey: str) -> str:
     """调用阿里云 NLS ISI 一次性识别
@@ -611,18 +631,17 @@ def main():
                         help="识别文字回 ESP32 串口 (assistant_text 帧)")
     args = parser.parse_args()
 
-    # 选择 ASR 引擎 (与 OMT asr.js 的"无 key 报错"对比, 我们加 mock 模式)
-    if args.mock or not (os.environ.get("ALIYUN_ACCESS_KEY_ID")
-                         and os.environ.get("ALIYUN_ACCESS_KEY_SECRET")
-                         and os.environ.get("ALIYUN_NLS_APPKEY")):
+    # 选择 ASR 引擎 (兼容 ALIYUN_* 和 ISI_* 两种 env 命名, 优先级 ALIYUN_* > ISI_*)
+    ak_id, ak_secret, appkey = get_aliyun_credentials()
+    if args.mock or not (ak_id and ak_secret and appkey):
         logger.warning("⚠  使用 Mock ASR 模式 (无 key 或显式 --mock)")
         asr = MockASREngine()
     else:
-        logger.info("✅ 使用 阿里云 NLS ISI 真实 ASR")
+        logger.info(f"✅ 使用 阿里云 NLS ISI 真实 ASR (appkey={appkey[:6]}...)")
         asr = NLSASREngine(
-            access_key_id=os.environ["ALIYUN_ACCESS_KEY_ID"],
-            access_key_secret=os.environ["ALIYUN_ACCESS_KEY_SECRET"],
-            appkey=os.environ["ALIYUN_NLS_APPKEY"],
+            access_key_id=ak_id,
+            access_key_secret=ak_secret,
+            appkey=appkey,
         )
 
     server = P4C5ASRServer(

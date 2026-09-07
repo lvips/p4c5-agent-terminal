@@ -32,6 +32,28 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+# ── Monkey-patch libopus 路径 (Mac Homebrew 安装到 /opt/homebrew/lib,
+#                              ctypes.util.find_library 找不到)
+# 必须在 import p4c5_asr_adapter 之前, 否则 opuslib.api.__init__ 抛 Exception
+import ctypes
+import ctypes.util
+def _find_opus_lib():
+    for p in ['/opt/homebrew/lib/libopus.dylib',
+              '/usr/local/lib/libopus.dylib',
+              '/usr/lib/libopus.dylib']:
+        if os.path.exists(p):
+            return p
+    return None
+
+_opus_path = _find_opus_lib()
+if _opus_path:
+    _orig_find_library = ctypes.util.find_library
+    ctypes.util.find_library = lambda name: _opus_path if name == 'opus' else _orig_find_library(name)
+    try:
+        ctypes.CDLL(_opus_path)  # 预加载
+    except OSError:
+        pass
+
 try:
     import websockets
     # 新版 websockets (>=12.0) 使用 asyncio.server
@@ -56,6 +78,7 @@ try:
         ASREngine, MockASREngine, NLSASREngine,
         OpusDecoder, MockOpusDecoder,
         VADSession, SAMPLE_RATE, CHANNELS,
+        get_aliyun_credentials,
     )
     HAS_ASR_ADAPTER = True
 except ImportError as e:
@@ -120,17 +143,23 @@ class MockDshServer:
     def _make_default_asr_engine():
         """根据环境变量自动选 backend
 
-        ALIYUN_ACCESS_KEY_ID / ALIYUN_ACCESS_KEY_SECRET / ALIYUN_NLS_APPKEY
+        支持两种命名:
+          - ALIYUN_ACCESS_KEY_ID / ALIYUN_ACCESS_KEY_SECRET / ALIYUN_NLS_APPKEY (p4c5 风格)
+          - ISI_ACCESS_KEY_ID  / ISI_ACCESS_KEY_SECRET  / ISI_APPKEY        (OMT 风格)
+        优先级: ALIYUN_* > ISI_*
+
         三个都设了 → 阿里云 NLS ISI (REST, 1:1 OMT port)
         否则 → Mock
         """
-        ak_id = os.environ.get("ALIYUN_ACCESS_KEY_ID")
-        ak_secret = os.environ.get("ALIYUN_ACCESS_KEY_SECRET")
-        appkey = os.environ.get("ALIYUN_NLS_APPKEY")
+        ak_id, ak_secret, appkey = get_aliyun_credentials()
         if ak_id and ak_secret and appkey:
-            logger.info(f"🔑 检测到 ALIYUN_NLS 凭证 → 用 NLSASREngine (REST, appkey={appkey[:6]}...)")
+            # 探测用的是哪组
+            if os.environ.get("ALIYUN_ACCESS_KEY_ID"):
+                logger.info(f"🔑 ALIYUN_* 凭证 → 用 NLSASREngine (REST, appkey={appkey[:6]}...)")
+            else:
+                logger.info(f"🔑 ISI_* OMT 风格凭证 → 用 NLSASREngine (REST, appkey={appkey[:6]}...)")
             return NLSASREngine(ak_id, ak_secret, appkey)
-        logger.info("🎭 无 ALIYUN_NLS 凭证 → 用 MockASREngine")
+        logger.info("🎭 无 ALIYUN_NLS/ISI 凭证 → 用 MockASREngine")
         return MockASREngine()
 
     """Mock DSH WebSocket 服务端"""
@@ -161,11 +190,12 @@ class MockDshServer:
         # OPUS 解码器 (用于 ASR backend)
         if self.use_opus_decoder:
             try:
-                self.opus_decoder = OpusDecoder(SAMPLE_RATE, CHANNELS)
+                # OpusDecoder 内部固定用 SAMPLE_RATE/CHANNELS, 无参构造
+                self.opus_decoder = OpusDecoder()
                 logger.info("🎧 OPUS 解码器: libopus (opuslib)")
-            except Exception:
+            except Exception as e:
                 self.opus_decoder = MockOpusDecoder()
-                logger.info("🎧 OPUS 解码器: Mock (opuslib 未装)")
+                logger.info(f"🎧 OPUS 解码器: Mock ({e})")
         else:
             self.opus_decoder = None
 
