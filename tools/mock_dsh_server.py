@@ -243,7 +243,9 @@ class MockDshServer:
         except websockets.ConnectionClosed as e:
             logger.info(f"🔌 连接关闭: {remote} (code={e.code}, reason={e.reason})")
         except Exception as e:
-            logger.error(f"💥 异常: {remote}: {e}")
+            import traceback
+            logger.error(f"💥 异常: {remote}: {type(e).__name__}: {e}")
+            logger.error(traceback.format_exc())
             stats['errors'] += 1
         finally:
             self.sessions.pop(ws, None)
@@ -524,7 +526,8 @@ class MockDshServer:
         if not hasattr(session, 'vad_session'):
             session.vad_session = VADSession(
                 asr=self.asr_engine,
-                on_text=lambda text: self._on_asr_text(ws, session, text),
+                # VADSession 调 on_text(text, meta) 传 2 个参数, lambda 必须接 2 个
+                on_text=lambda text, meta: self._on_asr_text(ws, session, text),
             ) if self.asr_engine else None
             session.audio_frames = 0
             session.audio_bytes = 0

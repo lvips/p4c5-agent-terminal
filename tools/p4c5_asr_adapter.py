@@ -120,9 +120,11 @@ def special_url_encode(s: str) -> str:
 
 def build_canonicalized_query(params: dict) -> str:
     """构建规范化查询字符串 (按 key 字典序排序)"""
-    keys = sorted(params.keys())
-    pairs = [f"{special_url_encode(k)}={special_url_encode(str(v))}" for k, v in keys]
-    return "&".join(pairs)
+    # 注意: 必须 iter items() 而不是 keys + 双层 for (前版本 bug: keys 是字符串列表, 不能 for k, v in keys)
+    return "&".join(
+        f"{special_url_encode(k)}={special_url_encode(str(params[k]))}"
+        for k in sorted(params.keys())
+    )
 
 
 def compute_pop_signature(access_key_secret: str, params: dict) -> str:
